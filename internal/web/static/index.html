@@ -202,12 +202,12 @@
     }
 
     .sidebar-search {
-      padding: 7px 12px;
+      padding: 5px 10px;
       border: none;
-      border-radius: 18px;
+      border-radius: 14px;
       background: var(--surface);
       color: var(--text);
-      font-size: 13px;
+      font-size: 12px;
       outline: none;
       width: 100%
     }
@@ -473,7 +473,7 @@
       text-decoration: underline
     }
 
-    .free-iran {
+    .positive-tag {
       color: var(--success);
       font-weight: 700
     }
@@ -959,7 +959,11 @@
       background: var(--bg);
       display: none;
       flex-direction: column;
-      color: var(--text)
+      color: var(--text);
+      padding-top: var(--safe-top);
+      padding-bottom: var(--safe-bottom);
+      padding-left: var(--safe-left);
+      padding-right: var(--safe-right)
     }
     .tm-modal.active { display: flex }
 
@@ -2968,6 +2972,8 @@
         TELEGRAM: <a href="https://t.me/networkti" target="_blank">@networkti</a>
         &middot;
         <a href="https://github.com/sartoopjj/thefeed" target="_blank">GitHub</a>
+        &middot;
+        <a href="https://sartoopjj.github.io/thefeed/privacy-policy.html" target="_blank" data-i18n="privacy_policy">Privacy</a>
       </div>
     </div>
 
@@ -3271,9 +3277,9 @@
     <div class="modal">
       <h2 id="profileEditorTitle" data-i18n="new_profile">New Profile</h2>
       <div id="peWarning" class="tg-warning"></div>
-      <div class="form-group"><label data-i18n="nickname">Nickname</label><input id="peNick" maxlength="32" placeholder="My Server">
+      <div class="form-group"><label data-i18n="nickname">Nickname</label><input id="peNick" maxlength="32" placeholder="My Server" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       </div>
-      <div class="form-group"><label data-i18n="domain">Domain</label><input id="peDomain" placeholder="t.example.com">
+      <div class="form-group"><label data-i18n="domain">Domain</label><input id="peDomain" placeholder="t.example.com" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       </div>
       <div class="form-group"><label data-i18n="passphrase">Passphrase</label><input type="password" id="peKey"
           placeholder="..."></div>
@@ -3436,7 +3442,7 @@
             <label data-i18n="scanner_targets">IPs or CIDRs (one per line)</label>
             <div style="display:flex;gap:4px">
               <button class="btn btn-flat" onclick="document.getElementById('scanTargets').value='';updateScanIpCount()" data-i18n="scanner_clear_targets" style="font-size:12px;padding:4px 10px">&#128465; Clear</button>
-              <button class="btn btn-flat" onclick="loadScannerPresets()" style="font-size:12px;padding:4px 10px"><img class="iran-flag-icon" src="/static/iran-lion-sun.svg" alt="IR" style="height:14px;vertical-align:middle;margin-right:2px"> <span data-i18n="scanner_load_presets">Load IR Presets</span></button>
+              <button class="btn btn-flat" onclick="loadScannerPresets()" style="font-size:12px;padding:4px 10px"><img class="lion-sun-icon" src="/static/lion-sun.svg" alt="" style="height:14px;vertical-align:middle;margin-right:2px"> <span data-i18n="scanner_load_presets">Load Presets</span></button>
             </div>
           </div>
           <textarea id="scanTargets" rows="3" placeholder="5.1.0.0/16&#10;8.8.8.8&#10;1.1.1.1" style="width:100%;font-family:monospace;font-size:13px" oninput="updateScanIpCount()"></textarea>
@@ -3709,8 +3715,9 @@
         scanner_about_short: 'بازه‌های IP را اسکن کنید تا ریزالورهای DNS سازگار با سرور شما پیدا شوند.',
         scanner_read_more: 'بیشتر بخوانید...',
         scanner_read_less: 'بستن',
-        scanner_load_presets: 'بارگذاری لیست ایران',
-        scanner_preset_active: 'ریزالورهای ایران بارگذاری شد',
+        scanner_load_presets: 'بارگذاری لیست پیش‌فرض',
+        scanner_preset_active: 'ریزالورهای پیش‌فرض بارگذاری شد',
+        privacy_policy: 'حریم خصوصی',
         scanner_from_input: 'از ورودی',
         scanner_from_preset: 'از پیش‌فرض',
         scanner_new_scan: 'اسکن جدید',
@@ -3954,8 +3961,9 @@
         scanner_about_short: 'Scan IP ranges to find DNS resolvers that work with your server.',
         scanner_read_more: 'Read more...',
         scanner_read_less: 'Show less',
-        scanner_load_presets: 'Load IR Presets',
-        scanner_preset_active: 'Iran resolvers loaded',
+        scanner_load_presets: 'Load Presets',
+        scanner_preset_active: 'Default resolvers loaded',
+        privacy_policy: 'Privacy',
         scanner_from_input: 'from input',
         scanner_from_preset: 'from preset',
         scanner_new_scan: 'New Scan',
@@ -4030,7 +4038,15 @@
         poll_placeholder: 'Poll (open Telegram to view)',
       }
     };
-    var lang = localStorage.getItem('thefeed_lang') || 'fa';
+    // Order: native bridge (iOS/Android) → localStorage → 'fa'.
+    // iOS localStorage is per-origin (host:port) so picking up the
+    // native value first survives an embedded server rebinding to a
+    // new loopback port on each launch.
+    var lang = (function () {
+      try { if (typeof IOS !== 'undefined' && IOS.getLang) { var v = IOS.getLang(); if (v) return v; } } catch (e) { }
+      try { if (typeof Android !== 'undefined' && Android.getLang) { var v2 = Android.getLang(); if (v2) return v2; } } catch (e) { }
+      return localStorage.getItem('thefeed_lang') || 'fa';
+    })();
     function t(k) { return (I18N[lang] && I18N[lang][k]) || I18N.en[k] || k }
     function applyLang() {
       var isRtl = lang === 'fa';
@@ -4051,6 +4067,7 @@
       localStorage.setItem('thefeed_lang', l);
       applyLang();
       if (typeof Android !== 'undefined') try { Android.setLang(l) } catch (e) { }
+      if (typeof IOS !== 'undefined' && IOS.setLang) try { IOS.setLang(l) } catch (e) { }
       fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lang: l }) }).catch(function () { });
     }
 
@@ -4126,7 +4143,10 @@
     });
     function filterChannels() {
       var q = document.getElementById('channelSearch').value.toLowerCase();
-      document.querySelectorAll('.ch-item').forEach(function (el) { el.style.display = el.dataset.name.toLowerCase().includes(q) ? 'flex' : 'none' });
+      document.querySelectorAll('.ch-item').forEach(function (el) {
+        var hay = (el.dataset.name + ' ' + (el.dataset.label || '')).toLowerCase();
+        el.style.display = hay.includes(q) ? 'flex' : 'none';
+      });
     }
 
     // ===== INIT =====
@@ -5552,7 +5572,7 @@
         // No 8.8.8.8 / 1.1.1.1 fallback — an empty resolver list in
         // the URI is the sender's deliberate choice (e.g. they want
         // the recipient to bring their own bank).
-        sharedNick = sharedNick.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 32);
+        sharedNick = sanitizeNickname(sharedNick);
         // Only ask about bank merging when the URI actually carried
         // resolvers — empty list means the sender shared zero, so
         // there's nothing to merge and no prompt to show.
@@ -5664,12 +5684,31 @@
       } catch (e) { showToast(e.message) }
     }
 
+    // sanitizeNickname extracts a clean alias from raw input. If the user
+    // pasted a thefeed:// URI, pulls the n= param. Strips control chars,
+    // the clipboard emoji, newlines, and trims to 32 chars.
+    function sanitizeNickname(raw) {
+      var v = String(raw || '');
+      var m = v.match(/thefeed:\/\/[^\s?#]+(?:\?[^\s#]*)?(?:[?&]n=([^&\s#]*))/i);
+      if (m && m[1]) {
+        try { v = decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch (e) { v = m[1]; }
+      }
+      // iOS Quick Type appends UI text starting with the clipboard glyph
+      // (U+1F4CB) when the user manually pastes — cut from there.
+      var clipIdx = v.indexOf('📋');
+      if (clipIdx >= 0) v = v.slice(0, clipIdx);
+      // Strip control / zero-width / bidi / BOM characters.
+      v = v.replace(/[\u0000-\u001F\u007F\u200B-\u200F\u2028\u2029\uFEFF]/g, "");
+      v = v.replace(/\s+/g, ' ').trim();
+      return v.slice(0, 32);
+    }
+
     async function saveProfile() {
       var errEl = document.getElementById('peError'); errEl.style.display = 'none';
       // Trim and clamp the nickname server-side too: the maxlength
       // attribute on the input only stops keyboard typing, not paste
       // / programmatic value setting.
-      var nick = document.getElementById('peNick').value.trim().slice(0, 32);
+      var nick = sanitizeNickname(document.getElementById('peNick').value);
       var domain = document.getElementById('peDomain').value.trim();
       var key = document.getElementById('peKey').value;
       if (!domain || !key) { errEl.textContent = t('domain') + ' / ' + t('passphrase'); errEl.style.display = 'block'; return }
@@ -5927,7 +5966,7 @@
           }
           h += '<div class="ch-avatar">' + avatarImg + '<span class="ch-avatar-letter">' + esc(avatarText) + '</span></div>';
           var chSubText = !isX ? (handle.charAt(0) === '@' ? handle : '@' + handle) : '';
-          h += '<div class="ch-info"><div class="ch-name">' + formatIranTitleHtml(label) + (isPriv ? '<span class="ch-type-tag">' + t('private') + '</span>' : (isX ? '<span class="ch-type-tag x-tag">' + t('x_label') + '</span>' : '')) + '</div>';
+          h += '<div class="ch-info"><div class="ch-name">' + formatTitleWithFlag(label) + (isPriv ? '<span class="ch-type-tag">' + t('private') + '</span>' : (isX ? '<span class="ch-type-tag x-tag">' + t('x_label') + '</span>' : '')) + '</div>';
           if (chSubText) h += '<div class="ch-sub">' + esc(chSubText) + '</div>';
           h += '<div class="ch-preview">' + badge + '</div></div>';
           var autoKey = handle.replace(/^@/, '').trim();
@@ -5986,7 +6025,7 @@
       newMsgScrollDone = false;
       openChat();
       var ch = channels[num - 1]; var name = (ch && (ch.DisplayName || ch.displayName || ch.Name || ch.name)) || 'Channel ' + num;
-      document.getElementById('chatName').innerHTML = formatIranTitleHtml(name);
+      document.getElementById('chatName').innerHTML = formatTitleWithFlag(name);
       var chHandle = (ch && (ch.Name || ch.name)) || '';
       var isXCh = ch && (ch.ChatType || ch.chatType) === 2;
       var subHandle = (!isXCh && chHandle) ? (chHandle.charAt(0) === '@' ? chHandle : '@' + chHandle) : '';
@@ -7294,8 +7333,8 @@
     // and the body of a [REPLY] (so a reply that carries an image
     // still renders a downloadable media card instead of dropping it).
     function parseTextMedia(text, idBase) {
-      var iranify = function (s) {
-        return linkify(s).replace(/🇮🇷/g, '<img src="/static/iran-lion-sun.svg" alt="\u{1F981}☀️" style="height:1.1em;vertical-align:middle">');
+      var swapNationalFlag = function (s) {
+        return linkify(s).replace(/🇮🇷/g, '<img src="/static/lion-sun.svg" alt="\u{1F981}☀️" style="height:1.1em;vertical-align:middle">');
       };
       var mediaTypes = ['[IMAGE]', '[VIDEO]', '[FILE]', '[AUDIO]', '[STICKER]', '[GIF]', '[CONTACT]', '[LOCATION]'];
       var rest = text;
@@ -7319,15 +7358,15 @@
       var mediaHtml = '';
       var textHtml = '';
       if (cards.length === 0) {
-        textHtml = iranify(text);
+        textHtml = swapNationalFlag(text);
       } else if (cards.length === 1) {
         var c0 = cards[0];
         if (c0.parsed.downloadable || c0.parsed.size > 0) {
           mediaHtml = renderDownloadableMedia(c0.tag, c0.parsed, idBase);
-          textHtml = c0.parsed.caption ? iranify(c0.parsed.caption) : '';
+          textHtml = c0.parsed.caption ? swapNationalFlag(c0.parsed.caption) : '';
         } else {
           mediaHtml = '<div class="media-tag">' + c0.tag + '</div>';
-          textHtml = iranify(text.substring(c0.tag.length).replace(/^\n/, ''));
+          textHtml = swapNationalFlag(text.substring(c0.tag.length).replace(/^\n/, ''));
         }
       } else {
         mediaHtml = '<div class="media-album">';
@@ -7335,7 +7374,7 @@
           mediaHtml += renderDownloadableMedia(cards[k].tag, cards[k].parsed, idBase + '-' + k);
         }
         mediaHtml += '</div>';
-        textHtml = rest ? iranify(rest) : '';
+        textHtml = rest ? swapNationalFlag(rest) : '';
       }
       return { mediaHtml: mediaHtml, textHtml: textHtml };
     }
@@ -7394,7 +7433,7 @@
           text = '';
         }
         currentMsgTexts.push(text);
-        var mediaHtml = '', textHtml = linkify(text).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/iran-lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1.1em;vertical-align:middle">');
+        var mediaHtml = '', textHtml = linkify(text).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1.1em;vertical-align:middle">');
         // Check for [REPLY]:ID or [REPLY] format (backward compat: also [REPLY:ID])
         var replyMatch = text.match(/^\[REPLY\](?::(\d+))?/) || text.match(/^\[REPLY:(\d+)\]/);
         if (replyMatch) {
@@ -7467,11 +7506,11 @@
             if (c0.parsed.downloadable || c0.parsed.size > 0) {
               mediaHtml = renderDownloadableMedia(c0.tag, c0.parsed, id);
               textHtml = c0.parsed.caption
-                ? linkify(c0.parsed.caption).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/iran-lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1.1em;vertical-align:middle">')
+                ? linkify(c0.parsed.caption).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1.1em;vertical-align:middle">')
                 : '';
             } else {
               mediaHtml = '<div class="media-tag">' + c0.tag + '</div>';
-              textHtml = linkify(text.substring(c0.tag.length).replace(/^\n/, '')).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/iran-lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1.1em;vertical-align:middle">');
+              textHtml = linkify(text.substring(c0.tag.length).replace(/^\n/, '')).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1.1em;vertical-align:middle">');
             }
           } else {
             mediaHtml = '<div class="media-album">';
@@ -7481,7 +7520,7 @@
             }
             mediaHtml += '</div>';
             textHtml = rest
-              ? linkify(rest).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/iran-lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1.1em;vertical-align:middle">')
+              ? linkify(rest).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1.1em;vertical-align:middle">')
               : '';
           }
         }
@@ -7757,7 +7796,7 @@
       document.getElementById('progressPanel').innerHTML = '';
       var p = document.getElementById('progressPanel');
       p.innerHTML = '<div class="progress-item" id="prog-init" data-last-update="' + Date.now() + '"><button class="progress-close" onclick="this.parentNode.remove()" title="Dismiss">&times;</button><div class="progress-label">' + t('loading') + '</div><div class="progress-bar"><div class="progress-fill" style="width:30%;animation:prog-pulse 1.5s ease-in-out infinite"></div></div></div>';
-      if (mobileQuery.matches) { openChat(); openLog(); }
+      if (mobileQuery.matches) { openChat(); }
     }
     function startAutoRefresh() { if (autoRefreshTimer) return; autoRefreshTimer = setInterval(function () { if (selectedChannel > 0) doRefresh(true) }, 600000) }
     function updateNextFetchDisplay() {
@@ -7853,8 +7892,8 @@
     }
 
     // ===== UTILITIES =====
-    function formatIranTitleHtml(s) {
-      return esc(s).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/iran-lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1em;vertical-align:middle">');
+    function formatTitleWithFlag(s) {
+      return esc(s).replace(/\uD83C\uDDEE\uD83C\uDDF7/g, '<img src="/static/lion-sun.svg" alt="\u{1F981}\u2600\uFE0F" style="height:1em;vertical-align:middle">');
     }
     function esc(s) { var d = document.createElement('div'); d.appendChild(document.createTextNode(s)); return d.innerHTML }
     function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;') }
@@ -7901,7 +7940,7 @@
     // ===== SCANNER =====
     var scanPollTimer = null;
     var scanLastResults = []; // cache for selection
-    var scannerActivePreset = ''; // server-side preset name (e.g. 'ir')
+    var scannerActivePreset = ''; // server-side preset name (e.g. 'default')
     var scannerPresetIpCount = 0; // IP count from preset
 
     function countCIDRIPs(text) {
@@ -7963,7 +8002,7 @@
     }
 
     async function loadScannerPresets() {
-      if (scannerActivePreset === 'ir') {
+      if (scannerActivePreset === 'default') {
         // Toggle off
         scannerActivePreset = '';
         scannerPresetIpCount = 0;
@@ -7988,7 +8027,7 @@
       var tag = document.getElementById('scanPresetTag');
       if (scannerActivePreset) {
         tag.style.display = '';
-        tag.innerHTML = '<img src="/static/iran-lion-sun.svg" alt="IR" style="height:14px;vertical-align:middle;margin-right:4px"> ' + t('scanner_preset_active');
+        tag.innerHTML = '<img src="/static/lion-sun.svg" alt="" style="height:14px;vertical-align:middle;margin-right:4px"> ' + t('scanner_preset_active');
       } else {
         tag.style.display = 'none';
         tag.textContent = '';

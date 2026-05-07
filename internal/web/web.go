@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"log"
 	mrand "math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -301,8 +302,15 @@ func New(dataDir string, port int, host string, password string) (*Server, error
 	return s, nil
 }
 
-// Run starts the web server.
-func (s *Server) Run() error {
+// Run starts the web server, binding to s.host:s.port.
+func (s *Server) Run() error { return s.serve(nil) }
+
+// Serve runs the web server on an already-bound listener. Used by the
+// mobile entry where the listener is opened first to discover the
+// kernel-assigned port.
+func (s *Server) Serve(ln net.Listener) error { return s.serve(ln) }
+
+func (s *Server) serve(ln net.Listener) error {
 	mux := http.NewServeMux()
 
 	staticSub, _ := fs.Sub(staticFS, "static")
@@ -416,6 +424,9 @@ func (s *Server) Run() error {
 		// idle period on the connection itself.
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       30 * time.Minute,
+	}
+	if ln != nil {
+		return srv.Serve(ln)
 	}
 	return srv.ListenAndServe()
 }
@@ -3008,7 +3019,11 @@ func (s *Server) persistScanResultsToList(healthy []string) {
 	}
 	list := findList(pl, pl.SelectedList)
 	if list == nil {
-		return
+		// First scan with no lists yet — seed a Default list so the
+		// UI doesn't show empty after the very first scan completes.
+		pl.ActiveLists = append(pl.ActiveLists, ActiveList{Name: defaultListName})
+		list = &pl.ActiveLists[len(pl.ActiveLists)-1]
+		pl.SelectedList = defaultListName
 	}
 	// Don't shrink a populated list on routine periodic checks.
 	if !overwrite && len(list.Resolvers) > 0 {
