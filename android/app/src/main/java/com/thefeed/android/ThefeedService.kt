@@ -11,6 +11,8 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.ServerSocket
 
 // gomobile-generated bindings (from mobile/mobile.go, package `mobile`).
 // The Go HTTP server runs in-process via a JNI .so loaded from the AAR
@@ -60,31 +62,55 @@ class ThefeedService : Service() {
                 val dataDir = File(filesDir, "thefeeddata")
                 if (!dataDir.exists()) dataDir.mkdirs()
 
-                // Prefer the last successful port so the WebView origin
-                // stays stable across launches (preserves localStorage).
-                // 0 lets the kernel pick if no usable preference exists.
-                val pref = readSavedPort().let {
-                    if (it in PORT_RANGE_MIN..PORT_RANGE_MAX) it else 0
-                }
+                // Pin the server to a port inside PORT_RANGE so the
+                // WebView origin stays stable across launches (otherwise
+                // localStorage resets every time). Kotlin scans for a
+                // free port and passes it to gomobile rather than letting
+                // the kernel pick a high random port.
+                val port = pickPort()
 
-                // BuildConfig.IS_UNIVERSAL is true only for the
-                // universal APK (built with -PuniversalBuild=true).
-                // Universal users stay on universal across updates;
-                // per-arch users stay on their matching split.
                 val s = if (BuildConfig.IS_UNIVERSAL) {
-                    Mobile.newAndroidUniversalServer(dataDir.absolutePath, pref.toLong())
+                    Mobile.newAndroidUniversalServer(dataDir.absolutePath, port.toLong())
                 } else {
-                    Mobile.newAndroidServer(dataDir.absolutePath, pref.toLong())
+                    Mobile.newAndroidServer(dataDir.absolutePath, port.toLong())
                 }
                 server = s
-                val port = s.port().toInt()
-                savePort(port)
-                updateForegroundNotification("Running on http://127.0.0.1:$port")
+                val actual = s.port().toInt()
+                savePort(actual)
+                updateForegroundNotification("Running on http://127.0.0.1:$actual")
             } catch (e: Throwable) {
                 savePort(-1)
                 updateForegroundNotification("Failed: ${e.message ?: e.javaClass.simpleName}")
             }
         }.start()
+    }
+
+    // tryBind probes whether `port` is bindable on 127.0.0.1. Closes
+    // immediately so gomobile can claim it; SO_REUSEADDR avoids the
+    // TIME_WAIT window from blocking the re-bind.
+    private fun tryBind(port: Int): Boolean {
+        return try {
+            val s = ServerSocket()
+            s.reuseAddress = true
+            s.bind(InetSocketAddress("127.0.0.1", port))
+            s.close()
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // Prefer the previously used port, then scan PORT_RANGE for any
+    // free slot. Falls back to 0 (kernel-assigned) only when the range
+    // is fully taken — in that case localStorage resets, which is
+    // unavoidable.
+    private fun pickPort(): Int {
+        val last = readSavedPort()
+        if (last in PORT_RANGE_MIN..PORT_RANGE_MAX && tryBind(last)) return last
+        for (p in PORT_RANGE_MIN..PORT_RANGE_MAX) {
+            if (tryBind(p)) return p
+        }
+        return 0
     }
 
     private fun readSavedPort(): Int {
