@@ -601,9 +601,10 @@ release:
       | Android | armeabi-v7a (older 32-bit phones) | [thefeed-android-${VERSION}-armeabi-v7a.apk - اندروید (دستگاه‌های قدیمی‌تر)](${DL_BASE}/thefeed-android-${VERSION}-armeabi-v7a.apk) |
       | Android | x86_64 (Chromebooks, emulators, WSA) | [thefeed-android-${VERSION}-x86_64.apk - اندروید (کروم‌بوک، شبیه‌ساز، WSA)](${DL_BASE}/thefeed-android-${VERSION}-x86_64.apk) |
       | Android | x86 (32-bit Intel, niche) | [thefeed-android-${VERSION}-x86.apk - اندروید (اینتل ۳۲ بیت، نادر)](${DL_BASE}/thefeed-android-${VERSION}-x86.apk) |
-      | iOS (unsigned) | universal | [thefeed-ios-${VERSION}-unsigned.ipa](${DL_BASE}/thefeed-ios-${VERSION}-unsigned.ipa) |
+      | iOS / iPadOS | TestFlight (**easiest — installs in one tap**) | [Join the TestFlight beta - نصب آسان روی آیفون](https://testflight.apple.com/join/J6bfxDdZ) |
+      | iOS (unsigned) | universal \`.ipa\` | [thefeed-ios-${VERSION}-unsigned.ipa](${DL_BASE}/thefeed-ios-${VERSION}-unsigned.ipa) |
 
-      **iOS / iPadOS (preview, iOS 14+):** the \`.ipa\` is unsigned. Re-sign it with your own Apple ID and provisioning profile (AltStore, Sideloadly, or \`xcrun altool\` upload to your own TestFlight). It will not install directly from a download.
+      **iOS / iPadOS (preview, iOS 14+):** the easiest install is the public [TestFlight beta](https://testflight.apple.com/join/J6bfxDdZ) — one tap, no computer needed. Otherwise the \`.ipa\` below is unsigned: re-sign it with your own Apple ID and provisioning profile (AltStore, Sideloadly, or \`xcrun altool\`). The \`.ipa\` will not install directly from a download.
 
       ## SHA-256 checksums
 
