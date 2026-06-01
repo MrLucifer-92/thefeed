@@ -389,4 +389,3 @@ func TestWriteListsInfoIncludeResolvers(t *testing.T) {
 		t.Errorf("default response leaked addresses: %+v", noAddrs)
 	}
 }
-
