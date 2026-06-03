@@ -281,7 +281,9 @@
       display: none;
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, .65);
+      background: rgba(0, 0, 0, .45);
+      -webkit-backdrop-filter: blur(12px) saturate(1.4);
+      backdrop-filter: blur(12px) saturate(1.4);
       z-index: 100;
       justify-content: center;
       align-items: center
@@ -294,14 +296,21 @@
     .modal {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 20px;
+      border-radius: var(--radius-2xl);
+      padding: var(--space-5);
       width: 440px;
       max-width: 95vw;
       max-height: 90vh;
       max-height: 90dvh;
       overflow-y: auto;
-      direction: rtl
+      direction: rtl;
+      box-shadow: var(--shadow-lg);
+      animation: modalIn var(--motion) var(--ease)
+    }
+
+    @keyframes modalIn {
+      from { opacity: 0; transform: scale(0.96) translateY(8px) }
+      to   { opacity: 1; transform: scale(1) translateY(0) }
     }
 
     html[dir=ltr] .modal {
@@ -309,16 +318,16 @@
     }
 
     .modal h2 {
-      margin-bottom: 16px;
-      font-size: 17px;
-      font-weight: 600
+      margin-bottom: var(--space-4);
+      font-size: var(--text-xl);
+      font-weight: var(--weight-semibold)
     }
 
     .modal-actions {
       display: flex;
-      gap: 8px;
+      gap: var(--space-2);
       justify-content: flex-end;
-      margin-top: 16px;
+      margin-top: var(--space-4);
       flex-wrap: wrap
     }
 
