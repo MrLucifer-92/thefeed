@@ -682,21 +682,24 @@
     .form-group textarea,
     .form-group select {
       width: 100%;
-      padding: 8px 12px;
+      padding: var(--space-2) var(--space-3);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--radius-md);
       background: var(--bg);
       color: var(--text);
-      font-size: 13px;
+      font-size: var(--text-sm);
       direction: ltr;
       text-align: left;
-      outline: none
+      outline: none;
+      transition: border-color var(--motion-fast) var(--ease),
+                  box-shadow var(--motion-fast) var(--ease)
     }
 
     .form-group input:focus,
     .form-group textarea:focus,
     .form-group select:focus {
-      border-color: var(--accent)
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(51, 144, 236, .25)
     }
 
     .form-group textarea {
@@ -982,7 +985,8 @@
     }
 
     .import-row input:focus {
-      border-color: var(--accent)
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(51, 144, 236, .25)
     }
 
     /* ===== CHANNEL EDITOR IN PROFILE ===== */
@@ -1007,7 +1011,8 @@
     }
 
     .channel-editor-row input:focus {
-      border-color: var(--accent)
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(51, 144, 236, .25)
     }
 
     .channel-list-item {
