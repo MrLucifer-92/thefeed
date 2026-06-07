@@ -1014,6 +1014,49 @@
       box-shadow: 0 0 0 3px rgba(51, 144, 236, .25)
     }
 
+    /* ===== BUILT-IN DEFAULT CONFIGS ===== */
+    .default-config-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      margin-bottom: 6px;
+      background: var(--bg-secondary, transparent)
+    }
+
+    .default-config-row .flag-emblem {
+      width: 26px;
+      height: auto;
+      flex: none;
+      border-radius: 3px;
+      box-shadow: 0 0 0 1px var(--border)
+    }
+
+    .default-config-info {
+      flex: 1;
+      min-width: 0
+    }
+
+    .default-config-name {
+      font-size: 13px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap
+    }
+
+    .default-config-domain {
+      font-size: 11px;
+      color: var(--text-dim);
+      direction: ltr;
+      text-align: start;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap
+    }
+
     /* ===== CHANNEL EDITOR IN PROFILE ===== */
     .channel-editor-row {
       display: flex;

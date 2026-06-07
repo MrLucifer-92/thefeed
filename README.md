@@ -65,6 +65,7 @@ Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
 - Browser-based web UI with RTL/Farsi support (VazirMatn font)
 - Sends encrypted DNS TXT queries via the resolver bank
 - **Resolver Bank**: shared pool of DNS resolvers used across all profiles. Resolvers are added via scanner, import, or manual entry and scored automatically
+- **Built-in starter configs**: the import dialog offers ready-made configs (with a bundled resolver preset) that can be imported in one tap
 - **Resolver scoring**: per-resolver success-rate + latency scoreboard with persistent scores; healthier resolvers are preferred. Low-scoring entries can be pruned
 - **Scatter mode**: fans out the same DNS request to multiple resolvers and uses the fastest response (default: 2 concurrent)
 - **Relay-aware media downloads** — picks the fast relay when the manifest advertises one, retries on transient failure, asks before falling back to the slow DNS path. Hash + size verified on every download

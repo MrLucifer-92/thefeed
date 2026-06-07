@@ -268,22 +268,7 @@ async function doImportUri() {
     // Only ask about bank merging when the URI actually carried
     // resolvers — empty list means the sender shared zero, so
     // there's nothing to merge and no prompt to show.
-    if (resolvers.length > 0) {
-      var bankData = { count: 0 };
-      try {
-        var bankRes = await fetch('/api/resolvers/bank', { signal: AbortSignal.timeout(5000) });
-        if (bankRes.ok) bankData = await bankRes.json();
-      } catch (e2) { }
-      var shouldAdd = true;
-      if (bankData.count > 0 && bankData.count <= 200) {
-        shouldAdd = await showConfirmDialog(t('import_add_resolvers').replace('{n}', resolvers.length), t('yes'), t('no'));
-      } else if (bankData.count > 200) {
-        shouldAdd = await showConfirmDialog(t('import_add_resolvers_large').replace('{n}', resolvers.length).replace('{c}', bankData.count), t('yes'), t('no'));
-      }
-      if (shouldAdd) {
-        await fetch('/api/resolvers/bank', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resolvers: resolvers }) });
-      }
-    }
+    await confirmAddResolversToBank(resolvers);
     // Create profile without resolvers (they're in the bank now).
     var profile = { id: '', nickname: sharedNick || domain, config: { domain: domain, key: key, queryMode: 'single', rateLimit: 6 } };
     var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', profile: profile }) });
@@ -291,6 +276,88 @@ async function doImportUri() {
     okEl.textContent = t('import_success').replace('{d}', domain); okEl.style.display = 'block';
     document.getElementById('importUriInput').value = '';
     await loadProfiles(); renderProfilesModal();
+    refreshResolversBadge();
+  } catch (e) { errEl.textContent = t('import_error') + ': ' + e.message; errEl.style.display = 'block' }
+}
+
+// confirmAddResolversToBank merges resolvers into the shared bank.
+// Asks first when the bank already has entries; no-op on empty input.
+async function confirmAddResolversToBank(resolvers) {
+  if (!resolvers || !resolvers.length) return;
+  var bankData = { count: 0 };
+  try {
+    var bankRes = await fetch('/api/resolvers/bank', { signal: AbortSignal.timeout(5000) });
+    if (bankRes.ok) bankData = await bankRes.json();
+  } catch (e) { }
+  var shouldAdd = true;
+  if (bankData.count > 0 && bankData.count <= 200) {
+    shouldAdd = await showConfirmDialog(t('import_add_resolvers').replace('{n}', resolvers.length), t('yes'), t('no'));
+  } else if (bankData.count > 200) {
+    shouldAdd = await showConfirmDialog(t('import_add_resolvers_large').replace('{n}', resolvers.length).replace('{c}', bankData.count), t('yes'), t('no'));
+  }
+  if (shouldAdd) {
+    await fetch('/api/resolvers/bank', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resolvers: resolvers }) });
+  }
+}
+
+// ===== BUILT-IN DEFAULT CONFIGS =====
+// Flag emblem shown next to each built-in config (same asset as the
+// scanner preset tag).
+var DEFAULT_CONFIG_EMBLEM = '<img class="flag-emblem" src="/static/lion-sun.svg" alt="">';
+
+var defaultConfigs = null; // {profiles: [...], resolvers: [...]} from /api/profiles/defaults
+
+async function toggleDefaultConfigs() {
+  var el = document.getElementById('defaultConfigsList');
+  if (!el) return;
+  if (el.style.display !== 'none') { el.style.display = 'none'; return }
+  if (!defaultConfigs) {
+    try {
+      var r = await fetch('/api/profiles/defaults');
+      if (!r.ok) throw new Error(await r.text() || 'failed');
+      defaultConfigs = await r.json();
+    } catch (e) { showToast(t('import_error') + ': ' + e.message); return }
+  }
+  renderDefaultConfigs();
+  el.style.display = '';
+}
+
+function renderDefaultConfigs() {
+  var el = document.getElementById('defaultConfigsList');
+  if (!el || !defaultConfigs) return;
+  var existing = {};
+  ((profiles && profiles.profiles) || []).forEach(function (p) {
+    existing[p.config.domain + ' ' + p.config.key] = true;
+  });
+  var h = '';
+  (defaultConfigs.profiles || []).forEach(function (d, i) {
+    var done = existing[d.domain + ' ' + d.key];
+    h += '<div class="default-config-row">';
+    h += DEFAULT_CONFIG_EMBLEM;
+    h += '<div class="default-config-info"><div class="default-config-name">' + esc(d.nickname) + '</div>';
+    h += '<div class="default-config-domain">' + esc(d.domain) + '</div></div>';
+    if (done) {
+      h += '<button class="btn btn-flat btn-sm" disabled>' + t('already_imported') + '</button>';
+    } else {
+      h += '<button class="btn btn-primary btn-sm" onclick="importDefaultConfig(' + i + ')">' + t('import') + '</button>';
+    }
+    h += '</div>';
+  });
+  el.innerHTML = h;
+}
+
+async function importDefaultConfig(i) {
+  if (!defaultConfigs || !defaultConfigs.profiles || !defaultConfigs.profiles[i]) return;
+  var d = defaultConfigs.profiles[i];
+  var errEl = document.getElementById('importError'); var okEl = document.getElementById('importSuccess');
+  errEl.style.display = 'none'; okEl.style.display = 'none';
+  try {
+    await confirmAddResolversToBank(defaultConfigs.resolvers || []);
+    var profile = { id: '', nickname: d.nickname || d.domain, config: { domain: d.domain, key: d.key, queryMode: 'single', rateLimit: 6 } };
+    var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', profile: profile }) });
+    if (!r.ok) throw new Error(await r.text() || 'save failed');
+    okEl.textContent = t('import_success').replace('{d}', d.nickname || d.domain); okEl.style.display = 'block';
+    await loadProfiles(); renderProfilesModal(); renderDefaultConfigs();
     refreshResolversBadge();
   } catch (e) { errEl.textContent = t('import_error') + ': ' + e.message; errEl.style.display = 'block' }
 }

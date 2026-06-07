@@ -398,6 +398,7 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/events", s.handleSSE)
 	mux.HandleFunc("/api/profiles", s.handleProfiles)
 	mux.HandleFunc("/api/profiles/switch", s.handleProfileSwitch)
+	mux.HandleFunc("/api/profiles/defaults", s.handleProfileDefaults)
 	mux.HandleFunc("/api/auto-update", s.handleAutoUpdate)
 	mux.HandleFunc("/api/auto-update/toggle", s.handleAutoUpdateToggle)
 	mux.HandleFunc("/api/pinned-channels/toggle", s.handlePinnedChannelToggle)
