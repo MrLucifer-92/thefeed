@@ -58,6 +58,10 @@ function buildProfileUri(id, selectedResolvers) {
   if (p.config.serverKey) {
     params.push('sk=' + p.config.serverKey);
   }
+  // Extra sub-domains (comma-separated). Kept before r= so resolvers stay last.
+  if (p.config.extraDomains && p.config.extraDomains.length) {
+    params.push('d=' + encodeURIComponent(p.config.extraDomains.join(',')));
+  }
   params.push('r=' + encodeURIComponent(compact).replace(/%3A/g, ':'));
   uri += params.join('&');
   return uri;
@@ -283,6 +287,7 @@ async function doImportUri() {
     var resolvers = [];
     var sharedNick = '';
     var serverKey = '';
+    var extraDomains = [];
     params.split('&').forEach(function (kv) {
       var eq = kv.indexOf('=');
       if (eq < 0) return;
@@ -293,6 +298,9 @@ async function doImportUri() {
         try { sharedNick = decodeURIComponent(v); } catch (e) { sharedNick = ''; }
       }
       else if (k === 'sk' && v) serverKey = v.trim();
+      else if (k === 'd' && v) {
+        try { extraDomains = decodeURIComponent(v).split(',').map(function (s) { return s.trim() }).filter(Boolean); } catch (e) { extraDomains = []; }
+      }
     });
     if (!domain || !key) { errEl.textContent = t('uri_missing'); errEl.style.display = 'block'; return }
     // No 8.8.8.8 / 1.1.1.1 fallback — an empty resolver list in
@@ -304,7 +312,7 @@ async function doImportUri() {
     // there's nothing to merge and no prompt to show.
     await confirmAddResolversToBank(resolvers);
     // Create profile without resolvers (they're in the bank now).
-    var profile = { id: '', nickname: sharedNick || domain, config: { domain: domain, key: key, serverKey: serverKey, queryMode: 'single', rateLimit: 6 } };
+    var profile = { id: '', nickname: sharedNick || domain, config: { domain: domain, key: key, serverKey: serverKey, extraDomains: extraDomains, queryMode: 'single', rateLimit: 6 } };
     var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', profile: profile }) });
     if (!r.ok) throw new Error('save failed');
     okEl.textContent = t('import_success').replace('{d}', domain);
@@ -372,9 +380,13 @@ function renderDefaultConfigs() {
     h += DEFAULT_CONFIG_EMBLEM;
     h += '<div class="default-config-info"><div class="default-config-name">' + esc(d.nickname) + '</div>';
     h += '<div class="default-config-domain">' + esc(d.domain) + '</div></div>';
+    var changed = existing && (
+      existing.config.key !== d.key ||
+      (existing.config.serverKey || '') !== (d.serverKey || '') ||
+      (existing.config.extraDomains || []).join(',') !== (d.extraDomains || []).join(','));
     if (!existing) {
       h += '<button class="btn btn-primary btn-sm" onclick="importDefaultConfig(' + i + ')">' + t('import') + '</button>';
-    } else if (existing.config.key !== d.key || (existing.config.serverKey || '') !== (d.serverKey || '')) {
+    } else if (changed) {
       h += '<button class="btn btn-primary btn-sm" onclick="importDefaultConfig(' + i + ',\'' + existing.id + '\')">' + t('update') + '</button>';
     } else {
       h += '<button class="btn btn-flat btn-sm" disabled>' + t('already_imported') + '</button>';
@@ -399,7 +411,7 @@ async function importDefaultConfig(i, updateId) {
       var ex = profiles.profiles.find(function (x) { return x.id === updateId });
       if (ex && ex.nickname) nick = ex.nickname;
     }
-    var profile = { id: updateId || '', nickname: nick, config: { domain: d.domain, key: d.key, serverKey: d.serverKey || '', queryMode: 'single', rateLimit: 6 } };
+    var profile = { id: updateId || '', nickname: nick, config: { domain: d.domain, key: d.key, serverKey: d.serverKey || '', extraDomains: d.extraDomains || [], queryMode: 'single', rateLimit: 6 } };
     var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: updateId ? 'update' : 'create', profile: profile }) });
     if (!r.ok) throw new Error(await r.text() || 'save failed');
     okEl.textContent = (updateId ? t('update_success') : t('import_success')).replace('{d}', nick); okEl.style.display = 'block';
@@ -423,6 +435,7 @@ function openProfileEditor(id) {
       document.getElementById('peDomain').value = p.config.domain || '';
       document.getElementById('peKey').value = p.config.key || '';
       document.getElementById('peServerKey').value = p.config.serverKey || '';
+      document.getElementById('peExtraDomains').value = (p.config.extraDomains || []).join(', ');
     }
     updateServerKeyHint();
     document.getElementById('peChannelSection').style.display = '';
@@ -443,6 +456,7 @@ function openProfileEditor(id) {
     document.getElementById('peDomain').value = '';
     document.getElementById('peKey').value = '';
     document.getElementById('peServerKey').value = '';
+    document.getElementById('peExtraDomains').value = '';
     updateServerKeyHint();
     document.getElementById('peChannelSection').style.display = 'none';
   }
@@ -524,11 +538,12 @@ async function saveProfile() {
   var domain = document.getElementById('peDomain').value.trim();
   var key = document.getElementById('peKey').value;
   var serverKey = (document.getElementById('peServerKey').value || '').trim();
+  var extraDomains = (document.getElementById('peExtraDomains').value || '').split(',').map(function (s) { return s.trim() }).filter(Boolean);
   if (!domain || !key) { errEl.textContent = t('domain') + ' / ' + t('passphrase'); errEl.style.display = 'block'; return }
-  var profile = { id: editingProfileId || '', nickname: nick || domain, config: { domain: domain, key: key, serverKey: serverKey } };
+  var profile = { id: editingProfileId || '', nickname: nick || domain, config: { domain: domain, key: key, serverKey: serverKey, extraDomains: extraDomains } };
   // Preserve fields the editor doesn't manage (e.g. autoScan) so saving
-  // from the editor doesn't wipe them. The server key now comes from its
-  // own editable field above.
+  // from the editor doesn't wipe them. Server key and extra domains now
+  // come from their own editable fields above.
   if (editingProfileId && profiles && profiles.profiles) {
     var existing = profiles.profiles.find(function (x) { return x.id === editingProfileId });
     if (existing && existing.config.autoScan === false) profile.config.autoScan = false;
@@ -563,6 +578,7 @@ async function saveProfile() {
       showInitProgress();
     } else {
       renderProfilesModal();
+      renderDefaultConfigs(); // keep default-config Import/Update states in sync
       // Only rescan if we updated the currently active profile
       if (savedEditId && savedEditId === activeProfileId) {
         showToast(t('rescan_started'));
@@ -585,6 +601,9 @@ async function deleteEditingProfile() {
     await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', profile: { id: editingProfileId }, skipCheck: true }) });
     await loadProfiles(); closeProfileEditor();
     if (document.getElementById('profilesModal').classList.contains('active')) renderProfilesModal();
+    // Refresh the default-configs list if it's open, so Import/Update button
+    // states reflect the deletion (no-op when defaults aren't loaded).
+    renderDefaultConfigs();
     refreshResolversBadge();
   } catch (e) { }
 }

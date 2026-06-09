@@ -57,6 +57,7 @@ Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
   - **GitHub relay** (fast, default off) uploads bytes to a repo so clients pull via plain HTTPS; intended for files that are too big for DNS
   - Future relays slot in alongside without breaking older clients
 - Random padding on responses (anti-DPI)
+- **Multi-domain** (`--extra-domains` / `THEFEED_EXTRA_DOMAINS`): the server answers feed queries on a main domain plus any number of extra sub-domains, and clients spread block fetches across all of them (load distribution + resilience if one domain is filtered). The main domain stays canonical for relay paths. The import URI carries the extras in the `d=` field.
 - Session persistence — login once, run forever
 - No-Telegram mode (`--no-telegram`) — reads public channels without credentials
 - All data stored in a single directory

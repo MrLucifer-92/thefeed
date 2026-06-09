@@ -23,7 +23,8 @@ const topResolverLimit = 20
 
 // DNSServer serves feed data over DNS TXT queries.
 type DNSServer struct {
-	domain       string
+	domain       string   // main domain; seeds domains[0] (relay paths derive from cfg.Domain separately)
+	domains      []string // main + extra sub-domains the server answers on (domains[0] == domain)
 	feed         *Feed
 	reader       *TelegramReader // nil when --no-telegram
 	channelCtl   channelRefresher
@@ -51,7 +52,8 @@ type channelFetchStats struct {
 type reportEvent struct {
 	channel  uint16
 	resolver string
-	invalid  bool // GetBlock failed for this query
+	domain   string // which configured domain the query arrived on
+	invalid  bool   // GetBlock failed for this query
 }
 
 type hourlyFetchReport struct {
@@ -63,6 +65,7 @@ type hourlyFetchReport struct {
 	invalidQueries  int64 // GetBlock returned an error (unknown ch / blk OOR)
 	perChannel      map[uint16]*channelFetchStats
 	perResolver     map[string]int64
+	perDomain       map[string]int64 // total queries per configured domain
 }
 
 type uploadSession struct {
@@ -98,7 +101,48 @@ func NewDNSServer(listenAddr, domain string, feed *Feed, queryKey, responseKey [
 		reportCh:     make(chan reportEvent, reportChannelBuffer),
 		debug:        debug,
 	}
+	s.domains = []string{s.domain}
 	return s
+}
+
+// SetExtraDomains adds sub-domains the server also answers feed queries on.
+// The main domain (from NewDNSServer) stays canonical for relay path
+// derivation. Blanks, the main domain, and duplicates are ignored. Call
+// before ListenAndServe.
+func (s *DNSServer) SetExtraDomains(extra []string) {
+	for _, d := range extra {
+		d = strings.TrimSuffix(strings.TrimSpace(d), ".")
+		if d == "" {
+			continue
+		}
+		dup := false
+		for _, existing := range s.domains {
+			if strings.EqualFold(existing, d) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			s.domains = append(s.domains, d)
+		}
+	}
+}
+
+// matchDomain returns the configured domain that qname belongs to, choosing
+// the longest suffix match so a sub-domain that nests under another is handled
+// correctly. Returns false when qname matches none of the configured domains.
+func (s *DNSServer) matchDomain(qname string) (string, bool) {
+	name := strings.ToLower(strings.TrimSuffix(qname, "."))
+	matched := ""
+	for _, d := range s.domains {
+		dl := strings.ToLower(d)
+		if name == dl || strings.HasSuffix(name, "."+dl) {
+			if len(d) > len(matched) {
+				matched = d
+			}
+		}
+	}
+	return matched, matched != ""
 }
 
 // SetChannelRefresher allows wiring a non-Telegram channel source (e.g. public reader)
@@ -125,7 +169,9 @@ func (s *DNSServer) SetXReader(xr *XPublicReader) {
 // ListenAndServe starts the DNS server on UDP, shutting down when ctx is cancelled.
 func (s *DNSServer) ListenAndServe(ctx context.Context) error {
 	mux := dns.NewServeMux()
-	mux.HandleFunc(s.domain+".", s.handleQuery)
+	for _, d := range s.domains {
+		mux.HandleFunc(d+".", s.handleQuery)
+	}
 
 	server := &dns.Server{
 		Addr:    s.listenAddr,
@@ -141,7 +187,7 @@ func (s *DNSServer) ListenAndServe(ctx context.Context) error {
 
 	go s.runHourlyReports(ctx)
 
-	log.Printf("[dns] listening on %s (domain: %s)", s.listenAddr, s.domain)
+	log.Printf("[dns] listening on %s (domains: %s)", s.listenAddr, strings.Join(s.domains, ", "))
 	return server.ListenAndServe()
 }
 
@@ -162,7 +208,16 @@ func (s *DNSServer) handleQuery(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	channel, block, err := protocol.DecodeQuery(s.queryKey, q.Name, s.domain)
+	// Identify which configured domain this query belongs to (main or a
+	// sub-domain) so the right suffix is stripped before decoding.
+	domain, ok := s.matchDomain(q.Name)
+	if !ok {
+		m.Rcode = dns.RcodeNameError
+		w.WriteMsg(m)
+		return
+	}
+
+	channel, block, err := protocol.DecodeQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode query: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -173,26 +228,26 @@ func (s *DNSServer) handleQuery(w dns.ResponseWriter, r *dns.Msg) {
 	// Handle upstream init/data queries
 	switch channel {
 	case protocol.UpstreamInitChannel:
-		s.handleUpstreamInitQuery(w, m, q)
+		s.handleUpstreamInitQuery(w, m, q, domain)
 		return
 	case protocol.UpstreamDataChannel:
-		s.handleUpstreamDataQuery(w, m, q)
+		s.handleUpstreamDataQuery(w, m, q, domain)
 		return
 	}
 
 	// Handle send-message queries
 	if channel == protocol.SendChannel {
-		s.handleSendQuery(w, m, q)
+		s.handleSendQuery(w, m, q, domain)
 		return
 	}
 
 	// Handle admin command queries
 	if channel == protocol.AdminChannel {
-		s.handleAdminQuery(w, m, q)
+		s.handleAdminQuery(w, m, q, domain)
 		return
 	}
 
-	s.trackRequestStart(channel, resolverHost(w.RemoteAddr()))
+	s.trackRequestStart(channel, resolverHost(w.RemoteAddr()), domain)
 	if s.debug {
 		log.Printf("[dns] query ch=%d blk=%d from=%s name=%s", channel, block, resolverHost(w.RemoteAddr()), q.Name)
 	}
@@ -280,14 +335,14 @@ func (s *DNSServer) cleanupExpiredSessions(now time.Time) {
 	}
 }
 
-func (s *DNSServer) handleUpstreamInitQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question) {
+func (s *DNSServer) handleUpstreamInitQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
 	if !s.allowManage {
 		m.Rcode = dns.RcodeRefused
 		w.WriteMsg(m)
 		return
 	}
 
-	init, err := protocol.DecodeUpstreamInitQuery(s.queryKey, q.Name, s.domain)
+	init, err := protocol.DecodeUpstreamInitQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode upstream init: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -319,14 +374,14 @@ func (s *DNSServer) handleUpstreamInitQuery(w dns.ResponseWriter, m *dns.Msg, q 
 	s.writeEncodedResponse(w, m, q.Name, []byte("READY"))
 }
 
-func (s *DNSServer) handleUpstreamDataQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question) {
+func (s *DNSServer) handleUpstreamDataQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
 	if !s.allowManage {
 		m.Rcode = dns.RcodeRefused
 		w.WriteMsg(m)
 		return
 	}
 
-	sessionID, index, chunk, err := protocol.DecodeUpstreamBlockQuery(s.queryKey, q.Name, s.domain)
+	sessionID, index, chunk, err := protocol.DecodeUpstreamBlockQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode upstream block: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -433,7 +488,7 @@ func (s *DNSServer) executeUpstreamPayload(sess *uploadSession, payload []byte) 
 	}
 }
 
-func (s *DNSServer) handleSendQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question) {
+func (s *DNSServer) handleSendQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
 	if !s.allowManage {
 		log.Printf("[dns] send query rejected: --allow-manage not set")
 		m.Rcode = dns.RcodeRefused
@@ -448,7 +503,7 @@ func (s *DNSServer) handleSendQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Ques
 		return
 	}
 
-	targetCh, message, err := protocol.DecodeSendQuery(s.queryKey, q.Name, s.domain)
+	targetCh, message, err := protocol.DecodeSendQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode send query: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -470,7 +525,7 @@ func (s *DNSServer) handleSendQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Ques
 	s.writeEncodedResponse(w, m, q.Name, []byte("OK"))
 }
 
-func (s *DNSServer) handleAdminQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question) {
+func (s *DNSServer) handleAdminQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
 	if !s.allowManage {
 		log.Printf("[dns] admin query rejected: --allow-manage not set")
 		m.Rcode = dns.RcodeRefused
@@ -478,7 +533,7 @@ func (s *DNSServer) handleAdminQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Que
 		return
 	}
 
-	cmd, arg, err := protocol.DecodeAdminQuery(s.queryKey, q.Name, s.domain)
+	cmd, arg, err := protocol.DecodeAdminQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode admin query: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -661,12 +716,12 @@ func resolverHost(addr net.Addr) string {
 	return addr.String()
 }
 
-func (s *DNSServer) trackRequestStart(channel uint16, resolver string) {
+func (s *DNSServer) trackRequestStart(channel uint16, resolver, domain string) {
 	// Exclude special control channels from per-channel content reporting.
 	if channel == protocol.UpstreamInitChannel || channel == protocol.UpstreamDataChannel || channel == protocol.SendChannel || channel == protocol.AdminChannel {
 		return
 	}
-	s.reportCh <- reportEvent{channel: channel, resolver: resolver}
+	s.reportCh <- reportEvent{channel: channel, resolver: resolver, domain: domain}
 }
 
 func (s *DNSServer) trackInvalidQuery() {
@@ -700,6 +755,7 @@ func newHourlyFetchReport(start time.Time) *hourlyFetchReport {
 		windowStart: start,
 		perChannel:  make(map[uint16]*channelFetchStats),
 		perResolver: make(map[string]int64),
+		perDomain:   make(map[string]int64),
 	}
 }
 
@@ -711,6 +767,9 @@ func recordReportQuery(rep *hourlyFetchReport, event reportEvent) {
 	rep.totalQueries++
 	if event.resolver != "" {
 		rep.perResolver[event.resolver]++
+	}
+	if event.domain != "" {
+		rep.perDomain[event.domain]++
 	}
 	channel := event.channel
 	if channel == protocol.MetadataChannel {
@@ -794,6 +853,22 @@ func (s *DNSServer) emitHourlyReport(rep *hourlyFetchReport, final bool) {
 		resolvers = resolvers[:topResolverLimit]
 	}
 
+	// Per-domain query totals (multi-domain): kept as its own report field.
+	type domainEntry struct {
+		Domain  string `json:"domain"`
+		Queries int64  `json:"queries"`
+	}
+	domains := make([]domainEntry, 0, len(rep.perDomain))
+	for d, q := range rep.perDomain {
+		domains = append(domains, domainEntry{Domain: d, Queries: q})
+	}
+	sort.Slice(domains, func(i, j int) bool {
+		if domains[i].Queries == domains[j].Queries {
+			return domains[i].Domain < domains[j].Domain
+		}
+		return domains[i].Queries > domains[j].Queries
+	})
+
 	payload := map[string]any{
 		"type":                 "dns_hourly_report",
 		"from":                 rep.windowStart.UTC().Format(time.RFC3339),
@@ -805,6 +880,7 @@ func (s *DNSServer) emitHourlyReport(rep *hourlyFetchReport, final bool) {
 		"totalInvalidQueries":  rep.invalidQueries,
 		"channels":             entries,
 		"topResolvers":         resolvers,
+		"domains":              domains,
 		"finalFlush":           final,
 	}
 	if mediaCache := s.feed.MediaCache(); mediaCache != nil {

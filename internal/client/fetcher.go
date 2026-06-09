@@ -63,7 +63,8 @@ func (s *resolverStat) score() float64 {
 
 // Fetcher fetches feed blocks over DNS.
 type Fetcher struct {
-	domain      string
+	domain      string   // main domain (canonical); used for upstream send/admin
+	domains     []string // main + extra sub-domains; feed reads spread across these
 	queryKey    [protocol.KeySize]byte
 	responseKey [protocol.KeySize]byte
 	queryMode   protocol.QueryEncoding
@@ -285,11 +286,51 @@ func NewFetcher(domain, passphrase string, resolvers []string) (*Fetcher, error)
 		timeout: 25 * time.Second,
 		scatter: 4, // query 4 resolvers in parallel by default
 	}
+	f.domains = []string{f.domain}
 	f.exchangeFn = func(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
 		c := &dns.Client{Timeout: f.timeout, Net: "udp"}
 		return c.ExchangeContext(ctx, m, addr)
 	}
 	return f, nil
+}
+
+// SetDomains sets the extra sub-domains feed queries are spread across, in
+// addition to the main domain from NewFetcher (which stays first/canonical).
+// Blanks, the main domain, and duplicates are ignored. Call at init.
+func (f *Fetcher) SetDomains(extra []string) {
+	domains := []string{f.domain}
+	for _, d := range extra {
+		d = strings.TrimSuffix(strings.TrimSpace(d), ".")
+		if d == "" {
+			continue
+		}
+		dup := false
+		for _, existing := range domains {
+			if strings.EqualFold(existing, d) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			domains = append(domains, d)
+		}
+	}
+	f.domains = domains
+}
+
+// pickDomain selects which domain a feed-block query goes to. With one domain
+// it returns it unchanged. With several it spreads deterministically by
+// (channel, block) — stable across users so the shared-resolver cache still
+// works — and rotates by attempt so a blocked/filtered domain is routed around
+// on retry.
+func (f *Fetcher) pickDomain(channel, block uint16, attempt int) string {
+	n := len(f.domains)
+	if n <= 1 {
+		return f.domain
+	}
+	base := uint32(channel)*2654435761 + uint32(block)*40503
+	idx := (int(base>>16) + attempt) % n
+	return f.domains[idx]
 }
 
 // SetRateLimit sets the maximum queries per second (0 = unlimited). Must be called before Start.
@@ -346,22 +387,26 @@ func (f *Fetcher) SetCacheEpoch(epoch uint32) { f.cacheEpoch.Store(epoch) }
 // based on the feature flag, the cached epoch, and channel eligibility.
 // No epoch (NextFetch=0) → random, to avoid sharing cache across a stale
 // or unknown server state.
-func (f *Fetcher) encodeBlockQuery(channel, block uint16) (string, error) {
+func (f *Fetcher) encodeBlockQuery(channel, block uint16, attempt int) (string, error) {
 	share := f.cacheShare.Load()
 	eligible := protocol.ChannelEligibleForSharedCache(channel)
 	epoch := f.cacheEpoch.Load()
 	if share && eligible && epoch != 0 {
 		var seed [4]byte
 		binary.BigEndian.PutUint32(seed[:], epoch)
+		// Stable domain (attempt ignored) so shared-cache queries stay
+		// identical across users and retries.
+		domain := f.pickDomain(channel, block, 0)
 		if f.debug {
-			f.log("[debug] det query ch=%d blk=%d epoch=%d", channel, block, epoch)
+			f.log("[debug] det query ch=%d blk=%d epoch=%d dom=%s", channel, block, epoch, domain)
 		}
-		return protocol.EncodeQueryDeterministic(f.queryKey, channel, block, f.domain, f.queryMode, seed[:])
+		return protocol.EncodeQueryDeterministic(f.queryKey, channel, block, domain, f.queryMode, seed[:])
 	}
+	domain := f.pickDomain(channel, block, attempt)
 	if f.debug {
-		f.log("[debug] rnd query ch=%d blk=%d share=%v eligible=%v epoch=%d", channel, block, share, eligible, epoch)
+		f.log("[debug] rnd query ch=%d blk=%d share=%v eligible=%v epoch=%d dom=%s", channel, block, share, eligible, epoch, domain)
 	}
-	return protocol.EncodeQuery(f.queryKey, channel, block, f.domain, f.queryMode)
+	return protocol.EncodeQuery(f.queryKey, channel, block, domain, f.queryMode)
 }
 
 // SetActiveResolvers updates the healthy resolver pool. Called by ResolverChecker.
@@ -809,7 +854,7 @@ func (f *Fetcher) FetchBlock(ctx context.Context, channel, block uint16) ([]byte
 			return nil, err
 		}
 
-		qname, err := f.encodeBlockQuery(channel, block)
+		qname, err := f.encodeBlockQuery(channel, block, attempt)
 		if err != nil {
 			return nil, fmt.Errorf("encode query: %w", err)
 		}

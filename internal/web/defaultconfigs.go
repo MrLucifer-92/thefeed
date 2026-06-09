@@ -10,10 +10,11 @@ import (
 // resolver preset below.
 
 type defaultProfile struct {
-	Nickname  string `json:"nickname"`
-	Domain    string `json:"domain"`
-	Key       string `json:"key"`
-	ServerKey string `json:"serverKey"` // pinned server signing pubkey (base64url); empty = unverified
+	Nickname     string   `json:"nickname"`
+	Domain       string   `json:"domain"`
+	Key          string   `json:"key"`
+	ServerKey    string   `json:"serverKey"`              // pinned server signing pubkey (base64url); empty = unverified
+	ExtraDomains []string `json:"extraDomains,omitempty"` // extra sub-domains feed queries spread across
 }
 
 // Domain and key are stored base64-encoded so the plain values are

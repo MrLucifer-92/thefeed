@@ -26,8 +26,12 @@ var staticFS embed.FS
 // Config holds the client configuration saved in the data directory.
 type Config struct {
 	Domain    string   `json:"domain"`
-	Key       string   `json:"key"`
-	Resolvers []string `json:"resolvers"`
+	// ExtraDomains are additional sub-domains the server also answers feed
+	// queries on; the client spreads block fetches across the main domain +
+	// these (main stays canonical for relay paths). From the d= URI field.
+	ExtraDomains []string `json:"extraDomains,omitempty"`
+	Key          string   `json:"key"`
+	Resolvers    []string `json:"resolvers"`
 	// ServerKey is the pinned server signing public key (base64url, the sk=
 	// field of a thefeed:// URI). When set, the client verifies feed content
 	// against the server's signed ExtraBlocks. Empty = unverified (old config).
@@ -574,6 +578,9 @@ func (s *Server) initFetcher() error {
 	fetcher, err := client.NewFetcher(cfg.Domain, cfg.Key, resolvers)
 	if err != nil {
 		return fmt.Errorf("create fetcher: %w", err)
+	}
+	if len(cfg.ExtraDomains) > 0 {
+		fetcher.SetDomains(cfg.ExtraDomains)
 	}
 	if cfg.ServerKey != "" {
 		if err := fetcher.SetServerPublicKey(cfg.ServerKey); err != nil {

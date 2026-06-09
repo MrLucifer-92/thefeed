@@ -162,6 +162,9 @@ func (s *Server) checkLatestVersion(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create fetcher: %w", err)
 	}
+	if len(cfg.ExtraDomains) > 0 {
+		fetcher.SetDomains(cfg.ExtraDomains)
+	}
 	if cfg.ServerKey != "" {
 		_ = fetcher.SetServerPublicKey(cfg.ServerKey)
 	}

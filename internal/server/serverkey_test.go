@@ -81,12 +81,24 @@ func TestConfigURI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := ConfigURI("t.example.com", "pass phrase", priv)
+	uri := ConfigURI("t.example.com", []string{"a.example.com", "b.example.com"}, "pass phrase", priv)
 	if !strings.HasPrefix(uri, "thefeed://t.example.com/") {
 		t.Errorf("bad prefix: %s", uri)
 	}
 	if !strings.Contains(uri, "sk="+ServerPublicKeyString(priv)) {
 		t.Errorf("missing sk=: %s", uri)
+	}
+	// Extra domains carried in d=, before r=.
+	if !strings.Contains(uri, "d=") {
+		t.Errorf("missing d= for extra domains: %s", uri)
+	}
+	// The comma between extra domains must be percent-escaped so the client's
+	// decodeURIComponent round-trip recovers the list.
+	if !strings.Contains(uri, "%2C") {
+		t.Errorf("comma in d= not percent-escaped: %s", uri)
+	}
+	if iD, iR := strings.Index(uri, "d="), strings.Index(uri, "r="); iD < 0 || iR < iD {
+		t.Errorf("r= must come after d=: %s", uri)
 	}
 	if !strings.Contains(uri, "1.1.1.1") || !strings.Contains(uri, "8.8.8.8") {
 		t.Errorf("missing bootstrap resolvers: %s", uri)

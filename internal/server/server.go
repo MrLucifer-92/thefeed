@@ -15,7 +15,8 @@ import (
 // Config holds server configuration.
 type Config struct {
 	ListenAddr          string
-	Domain              string
+	Domain              string   // main domain; canonical for relay path derivation
+	ExtraDomains        []string // additional sub-domains the server also answers feed queries on
 	Passphrase          string
 	DataDir             string // server state dir; holds the signing key
 	ChannelsFile        string
@@ -254,6 +255,7 @@ func (s *Server) Run(ctx context.Context) error {
 		maxPad = protocol.DefaultMaxPadding
 	}
 	dnsServer := NewDNSServer(s.cfg.ListenAddr, s.cfg.Domain, s.feed, queryKey, responseKey, maxPad, s.reader, s.cfg.AllowManage, s.cfg.ChannelsFile, s.xAccounts, s.cfg.Debug)
+	dnsServer.SetExtraDomains(s.cfg.ExtraDomains)
 	if channelCtl != nil {
 		dnsServer.SetChannelRefresher(channelCtl)
 	}

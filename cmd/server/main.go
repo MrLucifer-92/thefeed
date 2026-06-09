@@ -23,7 +23,8 @@ import (
 func main() {
 	dataDir := flag.String("data-dir", "./data", "Data directory for channels, session, and config")
 	listen := flag.String("listen", ":53", "DNS listen address (host:port)")
-	domain := flag.String("domain", "", "DNS domain (e.g., t.example.com)")
+	domain := flag.String("domain", "", "Main DNS domain (e.g., t.example.com); canonical for relay paths")
+	extraDomains := flag.String("extra-domains", "", "Comma-separated extra sub-domains to also answer feed queries on (clients spread queries across all of them)")
 	key := flag.String("key", "", "Encryption passphrase")
 	channelsFile := flag.String("channels", "", "Path to channels file (default: {data-dir}/channels.txt)")
 	privateChannelsFile := flag.String("private-channels", "", "Path to private-channel invite-links file (default: {data-dir}/private_channels.txt; one invite link per line; requires Telegram login)")
@@ -95,6 +96,15 @@ func main() {
 	if *domain == "" {
 		*domain = os.Getenv("THEFEED_DOMAIN")
 	}
+	if *extraDomains == "" {
+		*extraDomains = os.Getenv("THEFEED_EXTRA_DOMAINS")
+	}
+	var extraDomainList []string
+	for _, d := range strings.Split(*extraDomains, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			extraDomainList = append(extraDomainList, d)
+		}
+	}
 	if *key == "" {
 		*key = os.Getenv("THEFEED_KEY")
 	}
@@ -153,7 +163,7 @@ func main() {
 		if *printPubKey {
 			fmt.Println(server.ServerPublicKeyString(signKey))
 		} else {
-			fmt.Println(server.ConfigURI(*domain, *key, signKey))
+			fmt.Println(server.ConfigURI(*domain, extraDomainList, *key, signKey))
 		}
 		os.Exit(0)
 	}
@@ -240,6 +250,7 @@ func main() {
 	cfg := server.Config{
 		ListenAddr:          *listen,
 		Domain:              *domain,
+		ExtraDomains:        extraDomainList,
 		Passphrase:          *key,
 		DataDir:             *dataDir,
 		ChannelsFile:        *channelsFile,

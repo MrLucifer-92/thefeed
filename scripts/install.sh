@@ -363,26 +363,54 @@ setup_config() {
     echo -e "${green}═══════════════════════════════════════${plain}"
     echo ""
 
-    local cur_domain cur_key cur_limit cur_listen cur_fetch_interval
+    local cur_domain cur_key cur_limit cur_listen cur_fetch_interval cur_extra_domains
     if $is_update; then
         cur_domain=$(env_get THEFEED_DOMAIN)
         cur_key=$(env_get THEFEED_KEY)
         cur_limit=$(env_get THEFEED_MSG_LIMIT)
         cur_listen=$(env_get THEFEED_LISTEN)
         cur_fetch_interval=$(env_get THEFEED_FETCH_INTERVAL)
+        cur_extra_domains=$(env_get THEFEED_EXTRA_DOMAINS)
     fi
 
     local domain=""
     while true; do
         if [[ -n "$cur_domain" ]]; then
-            read -rp "DNS domain [${cur_domain}]: " domain
+            read -rp "Main DNS domain [${cur_domain}]: " domain
             domain="${domain:-$cur_domain}"
         else
-            read -rp "DNS domain (e.g., t.example.com): " domain
+            read -rp "Main DNS domain (e.g., t.example.com): " domain
         fi
         if [[ -n "$domain" ]]; then break; fi
         echo -e "${red}Domain cannot be empty${plain}"
     done
+
+    # Optional extra domains/sub-domains: clients spread feed queries across the
+    # main domain + these (they can be entirely separate domains, e.g.
+    # nws2.other.com). The main domain stays canonical for relay paths.
+    # Stored comma-separated in THEFEED_EXTRA_DOMAINS.
+    local extra_domains="$cur_extra_domains"
+    local do_collect_ed=false
+    echo ""
+    if [[ -n "$cur_extra_domains" ]]; then
+        echo -e "${yellow}Extra domains: ${cur_extra_domains}${plain}"
+        read -rp "Change extra domains? [y/N]: " change_ed
+        [[ "$change_ed" == "y" || "$change_ed" == "Y" ]] && do_collect_ed=true
+    else
+        read -rp "Add extra domains? Clients spread queries across them. [y/N]: " add_ed
+        [[ "$add_ed" == "y" || "$add_ed" == "Y" ]] && do_collect_ed=true
+    fi
+    if $do_collect_ed; then
+        echo -e "${yellow}Enter each extra domain (one per line, empty line to finish):${plain}"
+        extra_domains=""
+        while true; do
+            read -rp "  Domain: " ed
+            ed="${ed//[[:space:]]/}"
+            [[ -z "$ed" ]] && break
+            if [[ -n "$extra_domains" ]]; then extra_domains="${extra_domains},${ed}"; else extra_domains="$ed"; fi
+            echo -e "  ${green}Added ${ed}${plain}"
+        done
+    fi
 
     local passkey=""
     while true; do
@@ -553,6 +581,7 @@ setup_config() {
 
         cat > "$DATA_DIR/thefeed.env" <<ENVEOF
 THEFEED_DOMAIN=${domain}
+THEFEED_EXTRA_DOMAINS=${extra_domains}
 THEFEED_KEY=${passkey}
 THEFEED_ALLOW_MANAGE=${allow_manage}
 THEFEED_MSG_LIMIT=${msg_limit}
@@ -628,6 +657,7 @@ ENVEOF
 
     cat > "$DATA_DIR/thefeed.env" <<ENVEOF
 THEFEED_DOMAIN=${domain}
+THEFEED_EXTRA_DOMAINS=${extra_domains}
 THEFEED_KEY=${passkey}
 THEFEED_ALLOW_MANAGE=${allow_manage}
 THEFEED_MSG_LIMIT=${msg_limit}

@@ -74,18 +74,32 @@ func ServerPublicKeyString(priv ed25519.PrivateKey) string {
 	return base64.RawURLEncoding.EncodeToString(pub)
 }
 
-// ConfigURI builds the thefeed:// import URI advertising this server's
-// domain, passphrase, pinned signing public key (sk=), and two bootstrap
-// resolvers so a freshly-imported client can reach DNS immediately.
-func ConfigURI(domain, passphrase string, priv ed25519.PrivateKey) string {
+// ConfigURI builds the thefeed:// import URI advertising this server's main
+// domain (path), passphrase, pinned signing public key (sk=), any extra
+// sub-domains (d=, comma-separated), and two bootstrap resolvers so a
+// freshly-imported client can reach DNS immediately.
+func ConfigURI(domain string, extraDomains []string, passphrase string, priv ed25519.PrivateKey) string {
+	params := []string{"sk=" + ServerPublicKeyString(priv)}
+
+	var extra []string
+	for _, d := range extraDomains {
+		if d = strings.TrimSuffix(strings.TrimSpace(d), "."); d != "" {
+			extra = append(extra, d)
+		}
+	}
+	if len(extra) > 0 {
+		params = append(params, "d="+uriComponent(strings.Join(extra, ",")))
+	}
+
 	// Resolvers (r=) go LAST: if the URI is truncated (long resolver list,
 	// lost message tail), only trailing resolvers are dropped — domain, key,
-	// and sk= survive.
-	return fmt.Sprintf("thefeed://%s/%s?sk=%s&r=%s",
+	// sk=, and d= survive.
+	params = append(params, "r="+uriComponent("1.1.1.1,8.8.8.8"))
+
+	return fmt.Sprintf("thefeed://%s/%s?%s",
 		uriComponent(domain),
 		uriComponent(passphrase),
-		ServerPublicKeyString(priv),
-		uriComponent("1.1.1.1,8.8.8.8"),
+		strings.Join(params, "&"),
 	)
 }
 
