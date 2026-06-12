@@ -35,7 +35,8 @@ sudo bash -c "$(curl -Ls https://gitlab.com/sartoopjj/thefeed/-/raw/main/scripts
 
 <table align="center">
 <tr>
-<td align="center"><img src="docs/screenshots/feed-list.jpg" width="170" alt="فید اصلی"><br><sub>فید اصلی</sub></td>
+<td align="center"><img src="docs/screenshots/mainfeed.jpg" width="170" alt="فید اصلی"><br><sub>فید اصلی</sub></td>
+<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="پیام‌رسان"><br><sub>پیام‌رسان</sub></td>
 <td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="خواندن پست"><br><sub>خواندن پست</sub></td>
 <td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="تله‌میرور"><br><sub>تله‌میرور</sub></td>
 </tr>

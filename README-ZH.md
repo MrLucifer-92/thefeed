@@ -25,7 +25,8 @@
 
 <table align="center">
 <tr>
-<td align="center"><img src="docs/screenshots/feed-list.jpg" width="170" alt="Main feed"><br><sub>主信息流</sub></td>
+<td align="center"><img src="docs/screenshots/mainfeed.jpg" width="170" alt="Main feed"><br><sub>主信息流</sub></td>
+<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="Messenger"><br><sub>私信</sub></td>
 <td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="Reading a post"><br><sub>阅读消息</sub></td>
 <td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="Telemirror"><br><sub>Telemirror</sub></td>
 </tr>

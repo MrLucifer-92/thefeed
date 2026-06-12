@@ -25,7 +25,8 @@ Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
 
 <table align="center">
 <tr>
-<td align="center"><img src="docs/screenshots/feed-list.jpg" width="170" alt="Main feed"><br><sub>Main feed</sub></td>
+<td align="center"><img src="docs/screenshots/mainfeed.jpg" width="170" alt="Main feed"><br><sub>Main feed</sub></td>
+<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="Messenger"><br><sub>Messenger</sub></td>
 <td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="Reading a post"><br><sub>Reading a post</sub></td>
 <td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="Telemirror"><br><sub>Telemirror</sub></td>
 </tr>

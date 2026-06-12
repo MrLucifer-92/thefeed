@@ -25,7 +25,8 @@
 
 <table align="center">
 <tr>
-<td align="center"><img src="docs/screenshots/feed-list.jpg" width="170" alt="Main feed"><br><sub>Главная лента</sub></td>
+<td align="center"><img src="docs/screenshots/mainfeed.jpg" width="170" alt="Main feed"><br><sub>Главная лента</sub></td>
+<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="Messenger"><br><sub>Мессенджер</sub></td>
 <td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="Reading a post"><br><sub>Чтение поста</sub></td>
 <td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="Telemirror"><br><sub>Telemirror</sub></td>
 </tr>
