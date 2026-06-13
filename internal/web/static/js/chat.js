@@ -49,6 +49,9 @@ var chatState = {
 // doesn't make every server look chatless.
 var CHAT_AVAIL_RETRIES = 4;      // probe attempts while guiding (resolvers may be flaky)
 var CHAT_AVAIL_RETRY_MS = 2500;  // wait between probe attempts
+var CHAT_AVAIL_TIMEOUT_MS = 12000; // hard cap per probe — the DNS round trip can be
+                                   // slow (esp. Android); without it the "checking
+                                   // servers" overlay could hang the whole UI
 
 // While the messenger is OPEN, poll the server for new messages and delivery
 // (✓✓) updates. When the messenger is closed the Go background loop polls every
@@ -387,19 +390,30 @@ async function chatEnableMessenger() {
 // chatCheckAvailability does the DNS capability probe in the background. The
 // overlap guard lets the foreground timer call it repeatedly (to self-heal a
 // rebooting server) without stacking slow probes.
+// chatFetchTimeout is fetch with a hard timeout, so a hung DNS round trip can
+// never wedge the UI (e.g. leave the "checking servers" overlay up forever).
+function chatFetchTimeout(url, ms) {
+  var ctrl = new AbortController();
+  var t = setTimeout(function () { ctrl.abort(); }, ms);
+  return fetch(url, { signal: ctrl.signal }).finally(function () { clearTimeout(t); });
+}
+
 async function chatCheckAvailability() {
   if (chatState.availChecking) return;
   chatState.availChecking = true;
   var guiding = chatState.guideAfterAvail;
   chatState.guideAfterAvail = false;
-  if (guiding) chatShowCheckingServers();
-  // While guiding, retry a few times: if the resolvers are momentarily down
-  // every server looks chatless, so one failed probe must not be the verdict.
-  var attempts = guiding ? CHAT_AVAIL_RETRIES : 1;
+  // Everything below runs under one try/finally: availChecking and the blocking
+  // "checking" overlay MUST be cleared even if a probe throws/aborts, or the
+  // whole messenger wedges (taps eaten, renders deferred).
   try {
+    if (guiding) chatShowCheckingServers();
+    // While guiding, retry a few times: if the resolvers are momentarily down
+    // every server looks chatless, so one failed probe must not be the verdict.
+    var attempts = guiding ? CHAT_AVAIL_RETRIES : 1;
     for (var i = 0; i < attempts; i++) {
       try {
-        var r = await fetch('/api/chat/availability');
+        var r = await chatFetchTimeout('/api/chat/availability', CHAT_AVAIL_TIMEOUT_MS);
         chatState.avail = await r.json();
       } catch (e) { chatState.avail = { available: false, reason: 'chat_err_generic' }; }
       if (!chatState.open) break;                 // user left — stop probing
@@ -409,17 +423,15 @@ async function chatCheckAvailability() {
         if (!chatState.open) break;
       }
     }
-  } finally { chatState.availChecking = false; }
-  if (guiding) {
-    chatHideCheckingServers();
-    // Chat-capable servers exist but none enabled → open the toggles so the
-    // user actually turns one on. If none are reachable, fall through: the list
-    // shows the unreachable banner (with its Retry button), and the next open
-    // probes again.
-    if (chatState.open && chatState.view === 'list' &&
-      chatAvailServers().length > 0 && chatUsableServers().length === 0) {
-      chatServerSheet();
-    }
+  } finally {
+    chatState.availChecking = false;
+    if (guiding) chatHideCheckingServers();
+  }
+  // Chat-capable servers exist but none enabled → open the toggles so the user
+  // actually turns one on (only on the list, never over an open conversation).
+  if (guiding && chatState.open && chatState.view === 'list' &&
+    chatAvailServers().length > 0 && chatUsableServers().length === 0) {
+    chatServerSheet();
   }
   if (!chatState.open) return;
   if (chatState.view === 'list') chatRenderList();
