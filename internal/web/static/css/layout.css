@@ -574,3 +574,71 @@
       color: var(--text);
       font-size: var(--text-sm)
     }
+
+    /* ===== BACKGROUND PATTERNS ===== */
+    [data-bg-pattern] {
+      position: relative
+    }
+    [data-bg-pattern]::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-size: 50vw auto;
+      background-repeat: repeat;
+      opacity: .07;
+      pointer-events: none;
+      z-index: 0;
+      filter: invert(1)
+    }
+    @media (min-width: 768px) {
+      [data-bg-pattern]::before { background-size: 375px auto }
+    }
+    :root[data-theme="light"] [data-bg-pattern]::before {
+      filter: none;
+      opacity: .05
+    }
+    [data-bg-pattern] > * { position: relative; z-index: 1 }
+
+    /* Telemirror: pattern is on .tm-body; make .tm-content transparent so
+       the pattern shows through between the cards. */
+    [data-bg-pattern] > .tm-content { background: transparent }
+
+    [data-bg-pattern="pattern-1"]::before { background-image: url('/static/img/patterns/pattern-1.svg') }
+    [data-bg-pattern="pattern-10"]::before { background-image: url('/static/img/patterns/pattern-10.svg') }
+    [data-bg-pattern="pattern-11"]::before { background-image: url('/static/img/patterns/pattern-11.svg') }
+    [data-bg-pattern="pattern-13"]::before { background-image: url('/static/img/patterns/pattern-13.svg') }
+    [data-bg-pattern="pattern-23"]::before { background-image: url('/static/img/patterns/pattern-23.svg') }
+    [data-bg-pattern="pattern-31"]::before { background-image: url('/static/img/patterns/pattern-31.svg') }
+
+    /* Pattern selector grid in settings */
+    .bg-pattern-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px
+    }
+    .bg-pattern-item {
+      width: 52px;
+      height: 52px;
+      border-radius: 8px;
+      border: 2px solid var(--border);
+      cursor: pointer;
+      overflow: hidden;
+      position: relative;
+      background: var(--bg)
+    }
+    .bg-pattern-item:hover { border-color: var(--text-dim) }
+    .bg-pattern-item.selected { border-color: var(--accent) }
+    .bg-pattern-item img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      opacity: .15
+    }
+    .bg-pattern-none {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: var(--text-dim)
+    }

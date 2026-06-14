@@ -1543,6 +1543,10 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Send succeeded → server is reachable; clear poll backoff so the next
+	// background poll fetches replies immediately instead of waiting.
+	h.setBackoff(ps, time.Time{})
+
 	// Re-fetch the thread under the lock: a delete may have removed the
 	// pre-send pointer during the (multi-minute) upload, and reusing it would
 	// persist the map without this conversation, dropping the sent message.
@@ -1644,6 +1648,7 @@ func (s *Server) handleChatPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := s.chat
+	h.clearBackoffs() // explicit user action — bypass stale backoffs
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	progress := func(done, total int) {

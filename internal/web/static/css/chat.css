@@ -759,14 +759,25 @@
   border-top: 1px solid var(--border);
   background: var(--surface);
   padding: 9px 12px;
-  flex-shrink: 0
+  flex-shrink: 0;
+  position: relative
 }
 
-.chat-quota {
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-bottom: 6px;
-  text-align: center
+.chat-quota-dot {
+  position: absolute;
+  top: 2px;
+  right: 12px;
+  cursor: pointer;
+  line-height: 0;
+  user-select: none
+}
+
+.chat-send-error {
+  display: none;
+  font-size: 12px;
+  color: var(--error, #e53935);
+  padding: 4px 0 2px;
+  line-height: 1.4
 }
 
 .chat-progress {
@@ -805,7 +816,8 @@
 .chat-input-row {
   display: flex;
   gap: 8px;
-  align-items: flex-end
+  align-items: flex-end;
+  direction: ltr
 }
 
 .chat-input-row textarea {
@@ -831,11 +843,29 @@
   border-color: var(--accent)
 }
 
-/* Match the send button to the textarea's resting height so they sit on the
-   same line (the send button is on the inline-start side in RTL). */
-.chat-input-row .chat-btn-primary {
+.chat-send-btn {
+  width: 42px;
   height: 42px;
-  flex-shrink: 0
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0
+}
+
+.chat-send-btn:disabled {
+  opacity: .35;
+  cursor: default
+}
+
+.chat-send-btn .icon {
+  width: 20px;
+  height: 20px
 }
 
 .chat-empty {

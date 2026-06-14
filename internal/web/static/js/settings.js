@@ -2,6 +2,7 @@
 function openSettings() {
   renderLatestVersion();
   applyThemeButtons();
+  renderPatternGrid();
   switchSettingsTab('display');
   document.getElementById('settingsModal').classList.add('active');
   try { initAndroidSettings(); } catch (e) { console.error('initAndroidSettings error:', e); }

@@ -1120,7 +1120,7 @@
       box-shadow: var(--shadow-md);
       opacity: 0;
       transition: opacity var(--motion) var(--ease), transform var(--motion) var(--ease);
-      z-index: 999;
+      z-index: 99999;
       pointer-events: none;
       max-width: min(90vw, 420px);
       text-align: center;

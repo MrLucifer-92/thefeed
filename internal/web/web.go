@@ -787,6 +787,15 @@ func (s *Server) buildChatFetcher(cfg Config, resolvers []string, ctx context.Co
 	}
 	f.SetTimeout(time.Duration(to * float64(time.Second)))
 	f.SetLogFunc(func(msg string) { s.addLog(msg) })
+	if main := s.fetcher; main != nil {
+		f.SetStatsForward(func(resolver string, ok bool, latency time.Duration) {
+			if ok {
+				main.RecordSuccess(resolver, latency)
+			} else {
+				main.RecordFailure(resolver)
+			}
+		})
+	}
 	f.Start(ctx)
 	return f, nil
 }

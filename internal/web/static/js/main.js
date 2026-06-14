@@ -1,17 +1,76 @@
-// ===== BACKGROUND IMAGE =====
+// ===== BACKGROUND IMAGE & PATTERN =====
+var BG_PATTERNS = ['pattern-1','pattern-10','pattern-11','pattern-13','pattern-23','pattern-31'];
+
 function _setBg(url) {
-  var ca = document.querySelector('.chat-area');
-  ca.style.backgroundImage = url ? 'url("' + url + '")' : '';
-  ca.style.backgroundSize = url ? 'cover' : '';
-  ca.style.backgroundPosition = url ? 'center' : '';
-  ca.style.backgroundRepeat = url ? 'no-repeat' : '';
+  var targets = [
+    document.querySelector('.chat-area'),
+    document.querySelector('.chat-body-wrap')
+  ];
+  for (var i = 0; i < targets.length; i++) {
+    var el = targets[i];
+    if (!el) continue;
+    el.style.backgroundImage = url ? 'url("' + url + '")' : '';
+    el.style.backgroundSize = url ? 'cover' : '';
+    el.style.backgroundPosition = url ? 'center' : '';
+    el.style.backgroundRepeat = url ? 'no-repeat' : '';
+  }
   document.getElementById('messages').style.background = url ? 'transparent' : '';
 }
+
+function _applyPattern(id) {
+  var els = [
+    document.querySelector('.chat-area'),
+    document.querySelector('.tm-body'),
+    document.querySelector('.chat-body-wrap')
+  ];
+  for (var i = 0; i < els.length; i++) {
+    if (!els[i]) continue;
+    if (id) els[i].setAttribute('data-bg-pattern', id);
+    else els[i].removeAttribute('data-bg-pattern');
+  }
+  var msgs = document.getElementById('messages');
+  if (msgs) msgs.style.background = id ? 'transparent' : '';
+}
+
+function getBgPattern() {
+  try { return localStorage.getItem('bgPattern') || ''; } catch (e) { return ''; }
+}
+
+function selectBgPattern(id) {
+  try { localStorage.setItem('bgPattern', id || ''); } catch (e) {}
+  _applyPattern(id);
+  _updatePatternGrid();
+  if (id) {
+    // Clear custom image when selecting a pattern
+    try { fetch('/api/bg-image', { method: 'DELETE' }) } catch (e) {}
+    _setBg('');
+    var inp = document.getElementById('bgImageInput');
+    if (inp) inp.value = '';
+  }
+}
+
+function _updatePatternGrid() {
+  var cur = getBgPattern();
+  var items = document.querySelectorAll('.bg-pattern-item');
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    if (it.getAttribute('data-pattern') === cur) {
+      it.classList.add('selected');
+    } else {
+      it.classList.remove('selected');
+    }
+  }
+}
+
 function loadBgImage() {
-  // Use cache-busting query to ensure latest image.
+  var pat = getBgPattern();
+  if (pat) { _applyPattern(pat); return; }
   var url = '/api/bg-image?t=' + Date.now();
   fetch(url).then(function (r) {
-    if (r.status === 204 || !r.ok) return;
+    if (r.status === 204 || !r.ok) {
+      if (!getBgPattern()) selectBgPattern(BG_PATTERNS[0]);
+      return;
+    }
     _setBg('/api/bg-image?t=' + Date.now());
   }).catch(function () { });
 }
@@ -21,8 +80,6 @@ async function applyBgImage() {
   var file = inp.files[0];
   if (file.size > 10 * 1024 * 1024) { showToast('File too large (max 10MB)'); return }
   try {
-    // Buffer via FileReader so content:// URIs from Google Photos
-    // work too — fetch's stream path fails on those in some WebViews.
     var buf = await new Promise(function (resolve, reject) {
       var fr = new FileReader();
       fr.onload = function () { resolve(fr.result); };
@@ -35,6 +92,8 @@ async function applyBgImage() {
       body: buf
     });
     if (!r.ok) { showToast(await r.text()); return }
+    // Clear pattern when uploading custom image
+    selectBgPattern('');
     _setBg('/api/bg-image?t=' + Date.now());
     showToast(t('apply'));
   } catch (e) { showToast((e && e.message) || 'failed'); }
@@ -42,8 +101,24 @@ async function applyBgImage() {
 async function clearBgImage() {
   try { await fetch('/api/bg-image', { method: 'DELETE' }) } catch (e) { }
   _setBg('');
+  selectBgPattern('');
   document.getElementById('bgImageInput').value = '';
   showToast(t('clear_bg'));
+}
+
+function renderPatternGrid() {
+  var grid = document.getElementById('bgPatternGrid');
+  if (!grid) return;
+  var cur = getBgPattern();
+  var html = '<div class="bg-pattern-item bg-pattern-none' + (!cur ? ' selected' : '') +
+    '" data-pattern="" onclick="selectBgPattern(\'\')">✕</div>';
+  for (var i = 0; i < BG_PATTERNS.length; i++) {
+    var p = BG_PATTERNS[i];
+    html += '<div class="bg-pattern-item' + (cur === p ? ' selected' : '') +
+      '" data-pattern="' + p + '" onclick="selectBgPattern(\'' + p + '\')">' +
+      '<img src="/static/img/patterns/' + p + '.svg" alt="' + p + '"></div>';
+  }
+  grid.innerHTML = html;
 }
 
 // ===== EVENTS =====

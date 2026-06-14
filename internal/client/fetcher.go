@@ -108,6 +108,10 @@ type Fetcher struct {
 	// It defaults to a real dns.Client exchange and can be replaced in tests.
 	exchangeFn func(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error)
 
+	// statsForward, when set, receives a copy of every RecordSuccess/RecordFailure
+	// call so child fetchers (e.g. chat) can feed results back to the parent.
+	statsForward func(resolver string, ok bool, latency time.Duration)
+
 	// serverPubKey is the pinned server signing key (from the config's sk=).
 	// When non-nil, channel/metadata content is verified against the signed
 	// ExtraBlock served at block index == the channel's block count. nil
@@ -589,6 +593,12 @@ func (f *Fetcher) SetScatter(n int) {
 	f.scatter = n
 }
 
+// SetStatsForward registers a callback that receives a copy of every
+// success/failure so a child fetcher can feed results back to the parent.
+func (f *Fetcher) SetStatsForward(fn func(resolver string, ok bool, latency time.Duration)) {
+	f.statsForward = fn
+}
+
 // RecordSuccess records a successful DNS query for the given resolver.
 func (f *Fetcher) RecordSuccess(resolver string, latency time.Duration) {
 	if !strings.Contains(resolver, ":") {
@@ -598,6 +608,9 @@ func (f *Fetcher) RecordSuccess(resolver string, latency time.Duration) {
 	s := v.(*resolverStat)
 	atomic.AddInt64(&s.success, 1)
 	atomic.AddInt64(&s.totalMs, latency.Milliseconds())
+	if f.statsForward != nil {
+		f.statsForward(resolver, true, latency)
+	}
 }
 
 // RecordFailure records a failed DNS query for the given resolver.
@@ -608,6 +621,9 @@ func (f *Fetcher) RecordFailure(resolver string) {
 	v, _ := f.stats.LoadOrStore(resolver, &resolverStat{})
 	s := v.(*resolverStat)
 	atomic.AddInt64(&s.failure, 1)
+	if f.statsForward != nil {
+		f.statsForward(resolver, false, 0)
+	}
 }
 
 // resolverScore returns the health score for a resolver (higher = better).

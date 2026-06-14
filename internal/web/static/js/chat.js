@@ -37,7 +37,7 @@ var chatState = {
   safetyOpen: false, // inline safety-code explainer expanded
   connecting: false, // "connecting…" indicator currently shown for the in-flight send
   sendConnTimer: null, // delayed reveal of the "connecting…" indicator
-  statusChecking: false // a peer-status probe is in flight (prevent pile-up)
+  sendError: '' // persistent error banner text
 };
 
 // First-run server guidance: while NO chat server is enabled, every messenger
@@ -537,17 +537,48 @@ document.addEventListener('visibilitychange', function () {
   if (!document.hidden) chatLoadThreads();
 });
 
-function chatQuotaLine() {
+function chatQuotaSvg(frac) {
+  var r = 5, cx = 6, cy = 6, sz = 12;
+  var circ = 2 * Math.PI * r;
+  var fill = circ * frac;
+  var color = frac <= 0.2 ? 'var(--error,#e53935)' : 'var(--text-dim)';
+  return '<svg width="' + sz + '" height="' + sz + '" viewBox="0 0 ' + sz + ' ' + sz + '">' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="var(--border)" stroke-width="1.5"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + color + '" stroke-width="1.5"' +
+    ' stroke-dasharray="' + fill.toFixed(2) + ' ' + circ.toFixed(2) + '"' +
+    ' stroke-linecap="round" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>' +
+    '</svg>';
+}
+
+function chatQuotaIcon() {
   var q = chatState.quota;
-  if (q && q.remaining != null) {
-    var reset = q.resetUnix ? chatFmtTime(q.resetUnix) : '';
-    return chatT('chat_quota').replace('{n}', q.remaining).replace('{t}', reset);
-  }
-  // Before the first send/poll the live count is unknown — show the cap so the
-  // per-hour limit is always visible.
   var lim = chatState.avail && chatState.avail.limits;
-  if (lim && lim.sendPerHour) return chatT('chat_quota_cap').replace('{n}', lim.sendPerHour);
-  return '';
+  var cap = (lim && lim.sendPerHour) || 0;
+  if (!cap) return null;
+  var rem = (q && q.remaining != null) ? q.remaining : cap;
+  var frac = Math.max(0, Math.min(1, rem / cap));
+  var reset = (q && q.resetUnix) ? chatFmtTime(q.resetUnix) : '';
+  var detail = (q && q.remaining != null)
+    ? chatT('chat_quota').replace('{n}', q.remaining).replace('{t}', reset)
+    : chatT('chat_quota_cap').replace('{n}', cap);
+  return { svg: chatQuotaSvg(frac), detail: detail, low: frac <= 0.2 };
+}
+
+function chatShowQuotaDetail() {
+  var qi = chatQuotaIcon();
+  if (qi) showToast(qi.detail);
+}
+
+function chatShowSendError(msg) {
+  chatState.sendError = msg;
+  var el = document.getElementById('chatSendError');
+  if (el) { el.textContent = msg; el.style.display = msg ? 'block' : 'none'; }
+}
+
+function chatClearSendError() {
+  chatState.sendError = '';
+  var el = document.getElementById('chatSendError');
+  if (el) { el.textContent = ''; el.style.display = 'none'; }
 }
 
 // ---- thread list view ----
@@ -1278,18 +1309,33 @@ async function chatRenderThread() {
   html += '</div>'; // .chat-body-wrap
 
   html += '<div class="chat-footer">';
-  var ql = chatQuotaLine();
-  if (ql) html += '<div class="chat-quota" id="chatQuotaLine">' + esc(ql) + '</div>';
+  var qi = chatQuotaIcon();
+  if (qi) html += '<span class="chat-quota-dot" id="chatQuotaDot" onclick="chatShowQuotaDetail()" title="' + escAttr(qi.detail) + '">' + qi.svg + '</span>';
+  html += '<div class="chat-send-error" id="chatSendError"></div>';
   html += '<div class="chat-progress-wrap"><div class="chat-progress" id="chatSendProgress"><div class="chat-progress-fill" id="chatSendProgressFill"></div></div><span class="chat-progress-label" id="chatSendProgressLabel"></span></div>';
   html += '<div class="chat-input-row">' +
     '<textarea id="chatInput" dir="auto" placeholder="' + escAttr(chatT('chat_send_ph')) + '" rows="1" oninput="chatInputResize()" onkeydown="chatInputKey(event)"></textarea>' +
-    '<button class="chat-btn-primary" id="chatSendBtn" onclick="sendChatMessage()">' + esc(chatT('chat_send')) + '</button></div>';
+    '<button class="chat-send-btn" id="chatSendBtn" onclick="sendChatMessage()" aria-label="' + escAttr(chatT('chat_send')) + '">' + icon('send') + '</button></div>';
   html += '<div class="chat-charcount" id="chatCharCount"></div>';
   html += '</div>';
 
   // A popup may have opened during the await above — don't wipe it.
   if (chatOverlayOpen()) { chatState.renderPending = true; return; }
   document.getElementById('chatModal').innerHTML = html;
+  var chatWrap = document.querySelector('.chat-body-wrap');
+  if (chatWrap) {
+    if (typeof getBgPattern === 'function') {
+      var pat = getBgPattern();
+      if (pat) chatWrap.setAttribute('data-bg-pattern', pat);
+    }
+    var ca = document.querySelector('.chat-area');
+    if (ca && ca.style.backgroundImage) {
+      chatWrap.style.backgroundImage = ca.style.backgroundImage;
+      chatWrap.style.backgroundSize = 'cover';
+      chatWrap.style.backgroundPosition = 'center';
+      chatWrap.style.backgroundRepeat = 'no-repeat';
+    }
+  }
   var body = document.getElementById('chatMsgsBody');
   if (body) body.scrollTop = keepScroll ? prevScroll : body.scrollHeight;
   // ↓ button + unread-while-scrolled badge. Reset the seen-count when the open
@@ -1316,11 +1362,13 @@ async function chatRenderThread() {
       chatShowProgress('chatSendProgress', 0, 1, '↑'); // keep the "connecting…" bar
     }
   }
+  if (chatState.sendError) {
+    var errEl = document.getElementById('chatSendError');
+    if (errEl) { errEl.textContent = chatState.sendError; errEl.style.display = 'block'; }
+  }
   chatInputResize();
   chatUpdateCountdown();
-  // Auto-focus on first open, or keep focus the user already had — but a
-  // background refresh must NOT grab focus (it would re-pop the mobile keyboard).
-  if (inp && (firstRender || hadFocus)) {
+  if (inp && (firstRender || (hadFocus && !keepScroll))) {
     try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
   }
 }
@@ -1624,15 +1672,12 @@ async function chatFetchPeerStatus(addr, server) {
 // server it still has an undelivered message on, so ✓✓ lands even after the
 // user switched the conversation to a different server mid-thread.
 async function chatRefreshStatus(addr) {
-  if (!addr || chatState.statusChecking) return;
-  chatState.statusChecking = true;
-  try {
-    await chatFetchPeerStatus(addr, '');
-    var pend = chatState.pendingServers[addr] || [];
-    for (var i = 0; i < pend.length; i++) {
-      if (pend[i] && pend[i] !== chatState.curServer) await chatFetchPeerStatus(addr, pend[i]);
-    }
-  } finally { chatState.statusChecking = false; }
+  if (!addr) return;
+  await chatFetchPeerStatus(addr, '');
+  var pend = chatState.pendingServers[addr] || [];
+  for (var i = 0; i < pend.length; i++) {
+    if (pend[i] && pend[i] !== chatState.curServer) await chatFetchPeerStatus(addr, pend[i]);
+  }
 }
 
 async function sendChatMessage() {
@@ -1646,6 +1691,7 @@ async function sendChatMessage() {
     return;
   }
 
+  chatClearSendError();
   chatState.sending = true;
   chatState.sendProg = { done: 0, total: 1 };
   chatState.connecting = false;
@@ -1690,15 +1736,14 @@ async function sendChatMessage() {
       if (d.error === 'chat_err_rate_limited' && d.resetUnix) {
         msg += ' (' + chatFmtTime(d.resetUnix) + ')';
       }
-      showToast(msg);
-      // Not on this server → open the picker with a reason.
+      chatShowSendError(msg);
       if (d.error === 'chat_err_unknown_recipient' && chatUsableServers().length > 1) {
         chatSwitchServerSheet(chatFmtBidi(chatT('chat_switch_because_absent'),
           { n: chatState.contacts[peerAddr] || chatName(peerAddr), s: chatServerLabel(chatState.curServer) }));
       }
     }
   } catch (e) {
-    showToast(chatT('chat_err_generic'));
+    chatShowSendError(chatT('chat_err_generic'));
   } finally {
     chatState.sending = false;
     chatState.sendProg = null;

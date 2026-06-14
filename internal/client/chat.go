@@ -876,7 +876,7 @@ func (c *ChatClient) SendMessage(ctx context.Context, peer [protocol.AddressSize
 			}
 			lastErr = uerr
 			// Did the message land despite the transport error? (lost FIN-OK)
-			if acc, _, perr := c.PeerStatus(ctx, peer); perr == nil && acc >= seq {
+			if acc, _, perr := c.peerStatus(ctx, peer); perr == nil && acc >= seq {
 				rem, rst, _ := c.Quota()
 				c.f.log("[chat] send to %s seq=%d confirmed on server after transport error", ChatAddressString(peer)[:8], seq)
 				return &ChatSendResult{Seq: seq, Remaining: rem, ResetUnix: rst}, nil
@@ -1194,7 +1194,16 @@ func (c *ChatClient) Ack(ctx context.Context, peer [protocol.AddressSize]byte, u
 
 // PeerStatus returns (last_accepted ✓, last_delivered ✓✓) for own messages
 // sent to peer.
+// PeerStatus returns ✓/✓✓ counters, serialized with opSeq so it cannot swap
+// the session out from under an in-progress upload.
 func (c *ChatClient) PeerStatus(ctx context.Context, peer [protocol.AddressSize]byte) (accepted, delivered uint32, err error) {
+	c.opSeq.Lock()
+	defer c.opSeq.Unlock()
+	return c.peerStatus(ctx, peer)
+}
+
+// peerStatus is the unserialized core; used internally when opSeq is already held.
+func (c *ChatClient) peerStatus(ctx context.Context, peer [protocol.AddressSize]byte) (accepted, delivered uint32, err error) {
 	info, err := c.EnsureInfo(ctx)
 	if err != nil {
 		return 0, 0, err
