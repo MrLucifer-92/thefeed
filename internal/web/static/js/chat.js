@@ -2,6 +2,10 @@
 // Standalone E2E messenger over the chat sub-domains. All markup is rendered
 // here into #chatModal; state comes from /api/chat/*.
 
+function chatIsMobile() {
+  return 'ontouchstart' in window && window.innerWidth < 768;
+}
+
 var chatState = {
   open: false,
   view: 'list', // 'list' | 'thread'
@@ -293,16 +297,15 @@ function chatUnbindViewport() {
   }
   chatState.vvBound = false;
   var m = document.getElementById('chatModal');
-  if (m) { m.style.height = ''; m.style.top = ''; m.style.bottom = ''; }
+  if (m) { m.style.paddingBottom = ''; }
 }
 
 function chatViewportFit() {
   var vv = window.visualViewport;
   var m = document.getElementById('chatModal');
   if (!vv || !m) return;
-  m.style.top = vv.offsetTop + 'px';
-  m.style.height = vv.height + 'px';
-  m.style.bottom = 'auto';
+  var kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+  m.style.paddingBottom = kb ? ('calc(var(--safe-bottom) + ' + kb + 'px)') : '';
 }
 
 // ---- new-message notification (foreground only) ----
@@ -1357,7 +1360,6 @@ async function chatRenderThread() {
   // so re-disable the input (chatInputResize already disables the button while
   // sending) and repaint the live send-progress bar this render destroyed.
   if (chatState.sending) {
-    if (inp) inp.disabled = true;
     if (chatState.sendProg && chatState.sendProg.done >= 1) {
       chatShowProgress('chatSendProgress', chatState.sendProg.done, chatState.sendProg.total, '↑');
     } else if (chatState.connecting) {
@@ -1373,6 +1375,7 @@ async function chatRenderThread() {
   if (inp && (firstRender || (hadFocus && !keepScroll))) {
     try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
   }
+  if (inp) inp.addEventListener('blur', chatFlushPendingRender);
 }
 
 // chatUpdateScrollBtn shows the floating ↓ button while the user is scrolled up,
@@ -1383,7 +1386,10 @@ function chatUpdateScrollBtn() {
   var btn = document.getElementById('chatScrollDown');
   if (!body || !btn) return;
   var atBottom = body.scrollHeight - body.scrollTop - body.clientHeight <= 40;
-  if (atBottom) chatState.seenCount = chatState.msgCount; // caught up
+  if (atBottom) {
+    chatState.seenCount = chatState.msgCount;
+    if (chatState.renderPending) chatFlushPendingRender();
+  }
   btn.classList.toggle('hidden', atBottom);
   var unseen = Math.max(0, chatState.msgCount - chatState.seenCount);
   var badge = document.getElementById('chatScrollDownBadge');
@@ -1520,7 +1526,7 @@ function chatInputResize() {
 }
 
 function chatInputKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && !e.shiftKey && !chatIsMobile()) {
     e.preventDefault();
     sendChatMessage();
   }
@@ -1665,7 +1671,16 @@ async function chatFetchPeerStatus(addr, server) {
       d.delivered = chatMaxMap(prev && prev.delivered, d.delivered);
       chatState.peerStatus[addr] = d;
       if (d.quota) chatState.quota = d.quota; // live "N sends left this hour"
-      if (chatState.view === 'thread' && chatState.peer === addr) chatRenderThread();
+      if (chatState.view === 'thread' && chatState.peer === addr) {
+        var ci = document.getElementById('chatInput');
+        var mb = document.getElementById('chatMsgsBody');
+        var scrolledUp = mb && (mb.scrollHeight - mb.scrollTop - mb.clientHeight > 40);
+        if ((ci && document.activeElement === ci) || scrolledUp) {
+          chatState.renderPending = true;
+        } else {
+          chatRenderThread();
+        }
+      }
     }
   } catch (e) { }
 }
@@ -1698,7 +1713,6 @@ async function sendChatMessage() {
   chatState.sendProg = { done: 0, total: 1 };
   chatState.connecting = false;
   btn.disabled = true;
-  inp.disabled = true;
   // Reveal "connecting…" only if no block has gone out after a short delay
   // (cold-start session open); warm sends skip straight to the block bar.
   clearTimeout(chatState.sendConnTimer);
@@ -1751,8 +1765,6 @@ async function sendChatMessage() {
     chatState.sendProg = null;
     clearTimeout(chatState.sendConnTimer);
     chatState.connecting = false;
-    var inp2 = document.getElementById('chatInput');
-    if (inp2) inp2.disabled = false;
     chatInputResize(); // recompute the send button's enabled state
     chatHideProgress('chatSendProgress');
   }
