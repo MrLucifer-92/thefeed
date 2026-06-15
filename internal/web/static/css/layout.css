@@ -618,8 +618,8 @@
       margin-top: 8px
     }
     .bg-pattern-item {
-      width: 52px;
-      height: 52px;
+      width: 72px;
+      height: 72px;
       border-radius: 8px;
       border: 2px solid var(--border);
       cursor: pointer;
@@ -630,10 +630,15 @@
     .bg-pattern-item:hover { border-color: var(--text-dim) }
     .bg-pattern-item.selected { border-color: var(--accent) }
     .bg-pattern-item img {
-      width: 100%;
-      height: 100%;
+      width: 200%;
+      height: 200%;
       object-fit: cover;
-      opacity: .15
+      object-position: center;
+      opacity: .45
+    }
+    :root[data-theme="dark"] .bg-pattern-item img {
+      filter: invert(1);
+      opacity: .5
     }
     .bg-pattern-none {
       display: flex;
