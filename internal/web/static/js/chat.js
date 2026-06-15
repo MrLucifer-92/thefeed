@@ -1123,7 +1123,8 @@ function chatCellSizeSheet() {
         if (sc && sc.used > 0) {
           var label = Math.round(sc.queries) + chatT('chat_size_q');
           if (sc.errors >= 0.5) label += ' · ' + Math.round(sc.errors) + chatT('chat_size_err');
-          label += ' · ' + chatT('chat_size_score') + sc.cost.toFixed(1);
+          var rate = sc.queries > 0 ? (1 - sc.errors / sc.queries) : 1;
+          label += ' · ' + chatT('chat_size_score') + (rate * 10).toFixed(1);
           score = '<span class="chat-score">' + esc(label) + '</span>';
         }
       }
