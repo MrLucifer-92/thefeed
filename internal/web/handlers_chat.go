@@ -1501,6 +1501,12 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	chatc.OnHandshake = func(done, total int) {
+		s.broadcastChat(map[string]any{
+			"type": "progress", "op": "handshake",
+			"done": done, "total": total,
+		})
+	}
 	progress := func(done, total int) {
 		s.broadcastChat(map[string]any{
 			"type": "progress", "op": "send", "peer": peerStr,
@@ -1651,6 +1657,15 @@ func (s *Server) handleChatPoll(w http.ResponseWriter, r *http.Request) {
 	h.clearBackoffs() // explicit user action — bypass stale backoffs
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
+	hsProgress := func(done, total int) {
+		s.broadcastChat(map[string]any{
+			"type": "progress", "op": "handshake",
+			"done": done, "total": total,
+		})
+	}
+	for _, ps := range h.snapshotServers() {
+		ps.client.OnHandshake = hsProgress
+	}
 	progress := func(done, total int) {
 		s.broadcastChat(map[string]any{
 			"type": "progress", "op": "poll",

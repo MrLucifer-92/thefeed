@@ -161,6 +161,8 @@ type ChatClient struct {
 	// re-handshakes. Spacing handshakes by chatRehandshakeMinGap caps that
 	// amplification while still letting a genuine reboot/expiry recover.
 	lastHandshake time.Time
+	// OnHandshake, if set, reports handshake cell progress (done, total).
+	OnHandshake ChatProgress
 	// budget is the per-cell op-plaintext budget B (RFC §8.2): smaller = shorter
 	// queries, more of them. The cell is self-describing by length, so the server
 	// needs no negotiation; the value is clamped to [ChatCellPlainMin, Max].
@@ -543,6 +545,9 @@ func (c *ChatClient) handshake(ctx context.Context, info *protocol.ChatInfo, kin
 			}
 			if data, de := c.sendQuery(ctx, qname); de == nil {
 				last = data
+			}
+			if c.OnHandshake != nil {
+				c.OnHandshake(i+1, n)
 			}
 		}
 		if st, body, oe := protocol.OpenChatResponse(ks, tag, protocol.ChatBootstrapCounter(), last); oe == nil {

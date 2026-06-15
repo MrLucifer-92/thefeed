@@ -1869,6 +1869,18 @@ function chatHideProgress(id) {
   if (label) label.textContent = '';
 }
 
+function chatShowHandshakeProgress(done, total) {
+  var bar = document.getElementById('chatSendProgress');
+  if (!bar) return;
+  if (done >= total) { return; }
+  bar.classList.add('active');
+  bar.classList.remove('indeterminate');
+  var fill = document.getElementById('chatSendProgressFill');
+  var label = document.getElementById('chatSendProgressLabel');
+  if (fill) fill.style.width = (Math.round(done * 100 / total) + '%');
+  if (label) label.textContent = chatT('chat_connecting') + ' ' + done + '/' + total;
+}
+
 // Receive/poll progress can be shown in either view (list has chatPollProgress,
 // thread has chatRecvProgress); update whichever is present.
 function chatShowPollProgress(done, total) {
@@ -1884,7 +1896,12 @@ function chatHidePollProgress() {
 function chatOnSSE(data) {
   if (!data || typeof data !== 'object') return;
   if (data.type === 'progress') {
-    if (data.op === 'send') {
+    if (data.op === 'handshake') {
+      clearTimeout(chatState.sendConnTimer);
+      chatState.connecting = false;
+      chatShowHandshakeProgress(data.done, data.total);
+    }
+    else if (data.op === 'send') {
       chatState.sendProg = { done: data.done, total: data.total };
       // done==0: leave it to the connecting timer; the block bar shows once acked.
       if (data.done >= 1) {
