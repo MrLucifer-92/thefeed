@@ -1729,15 +1729,13 @@ async function sendChatMessage() {
   chatState.sendProg = { done: 0, total: 1 };
   chatState.connecting = false;
   btn.disabled = true;
-  // Reveal "connecting…" only if no block has gone out after a short delay
-  // (cold-start session open); warm sends skip straight to the block bar.
   clearTimeout(chatState.sendConnTimer);
   chatState.sendConnTimer = setTimeout(function () {
-    if (chatState.sending && (!chatState.sendProg || chatState.sendProg.done < 1)) {
+    if (chatState.sending && !chatState.sendProg) {
       chatState.connecting = true;
-      chatShowProgress('chatSendProgress', 0, 1, '↑'); // done==0 → indeterminate "connecting…"
+      chatShowHandshakeProgress(0);
     }
-  }, 700);
+  }, 1500);
 
   var peerAddr = chatState.peer;
   try {
@@ -1875,16 +1873,9 @@ function chatShowProgress(id, done, total, arrow) {
   bar.classList.add('active');
   var fill = document.getElementById(id + 'Fill');
   var label = document.getElementById(id + 'Label');
-  // Send at done==0 (still opening the session): show an indeterminate
-  // "connecting…" bar instead of a frozen 0/N.
-  var connecting = (id === 'chatSendProgress' && done === 0);
-  bar.classList.toggle('indeterminate', connecting);
-  if (fill) fill.style.width = connecting ? '100%' : (Math.round(done * 100 / total) + '%');
-  if (label) {
-    label.textContent = connecting
-      ? chatT('chat_connecting')
-      : ((arrow || '') + ' ' + done + '/' + total + ' ' + chatT('chat_blocks'));
-  }
+  bar.classList.remove('indeterminate');
+  if (fill) fill.style.width = (Math.round(done * 100 / total) + '%');
+  if (label) label.textContent = (arrow || '') + ' ' + done + '/' + total + ' ' + chatT('chat_blocks');
 }
 
 function chatHideProgress(id) {
@@ -1931,12 +1922,9 @@ function chatOnSSE(data) {
     }
     else if (data.op === 'send') {
       chatState.sendProg = { done: data.done, total: data.total };
-      // done==0: leave it to the connecting timer; the block bar shows once acked.
-      if (data.done >= 1) {
-        clearTimeout(chatState.sendConnTimer);
-        chatState.connecting = false;
-        chatShowProgress('chatSendProgress', data.done, data.total, '↑');
-      }
+      clearTimeout(chatState.sendConnTimer);
+      chatState.connecting = false;
+      chatShowProgress('chatSendProgress', data.done, data.total, '↑');
     }
     else if (data.op === 'poll') chatShowPollProgress(data.done, data.total);
     return;
