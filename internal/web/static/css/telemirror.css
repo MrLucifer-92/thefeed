@@ -676,8 +676,7 @@
       font-size: var(--text-lg);
       text-decoration: none;
       opacity: 0;
-      transition: opacity .15s, background .15s;
-      backdrop-filter: blur(2px)
+      transition: opacity .15s, background .15s
     }
 
     .tm-photo:hover .tm-photo-dl {
@@ -713,8 +712,10 @@
       width: 54px;
       height: 54px;
       border-radius: 50%;
-      background: rgba(0, 0, 0, .5);
-      backdrop-filter: blur(4px);
+      /* No backdrop-filter: it re-blurs on every repaint, which janks the
+         drawer slide + scroll on Android WebView. The solid fill + shadow keep
+         the play icon legible without it. */
+      background: rgba(0, 0, 0, .6);
       display: inline-flex;
       align-items: center;
       justify-content: center;

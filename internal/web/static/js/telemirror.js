@@ -964,8 +964,19 @@
 
   // Strip href from all <a> tags inside rendered posts so the browser/OS
   // never navigates or shows "Open in Telegram?". The real URL is kept in
-  // data-href; the delegated click handler reads it.
+  // data-href; the delegated click handler reads it. Defence-in-depth: also
+  // drop inline event handlers (on*) the source HTML may carry — some channels
+  // ship links with onclick="return confirm(...)", which fires a native popup
+  // before our handler (and is an XSS vector). The backend sanitises these too,
+  // but this also neutralises already-cached posts parsed before that fix.
   function tmNeuterLinks(container) {
+    var all = container.querySelectorAll('*');
+    for (var j = 0; j < all.length; j++) {
+      var el = all[j];
+      for (var k = el.attributes.length - 1; k >= 0; k--) {
+        if (/^on/i.test(el.attributes[k].name)) el.removeAttribute(el.attributes[k].name);
+      }
+    }
     var links = container.querySelectorAll('a[href]');
     for (var i = 0; i < links.length; i++) {
       var a = links[i];
