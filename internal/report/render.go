@@ -167,9 +167,9 @@ func renderDashboard(a *aggregate, accounts, top int, live bool) string {
 			w("  Registered accounts: %14s   %s(%s)%s\n", comma(acc), cDim, src, cReset)
 		}
 		if cs := a.lastChatStats; cs != nil {
-			w("  Messages committed : %14s   %s(latest window)%s\n", comma(cs["messages"]), cDim, cReset)
+			w("  Messages committed : %14s\n", comma(cs["messages"]))
 			if cs["registers"] > 0 {
-				w("  Registrations / hr : %14s\n", comma(cs["registers"]))
+				w("  Registrations      : %14s\n", comma(cs["registers"]))
 			}
 		}
 		w("  Chat queries / hr  : %14s   %s(avg over window)%s\n", comma(a.chat/int64(maxInt(a.reports, 1))), cDim, cReset)

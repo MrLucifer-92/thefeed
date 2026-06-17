@@ -1319,11 +1319,11 @@ func (s *Server) handleChatContacts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", 400)
 			return
 		}
-		if _, err := client.ParseChatAddress(req.Addr); err != nil {
+		addr, err := client.CanonicalChatAddress(req.Addr)
+		if err != nil {
 			http.Error(w, "invalid address", 400)
 			return
 		}
-		addr := strings.ToLower(strings.TrimSpace(req.Addr))
 		h.mu.Lock()
 		if strings.TrimSpace(req.Name) == "" {
 			delete(h.contacts, addr)
@@ -1391,11 +1391,11 @@ func (s *Server) handleChatThread(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
-	if _, err := client.ParseChatAddress(req.Peer); err != nil {
+	addr, err := client.CanonicalChatAddress(req.Peer)
+	if err != nil {
 		http.Error(w, "invalid peer", 400)
 		return
 	}
-	addr := strings.ToLower(strings.TrimSpace(req.Peer))
 	h := s.chat
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1437,8 +1437,8 @@ func (s *Server) handleChatThread(w http.ResponseWriter, r *http.Request) {
 // handleChatMessages returns one conversation (optionally clearing unread).
 func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	h := s.chat
-	addr := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("peer")))
-	if _, err := client.ParseChatAddress(addr); err != nil {
+	addr, err := client.CanonicalChatAddress(r.URL.Query().Get("peer"))
+	if err != nil {
 		http.Error(w, "invalid peer", 400)
 		return
 	}
@@ -1498,7 +1498,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h := s.chat
-	peerStr := strings.ToLower(strings.TrimSpace(req.Peer))
+	peerStr := client.ChatAddressString(peer)
 	ps := h.resolveServer(peerStr, req.Server)
 	if ps == nil {
 		writeJSON(w, map[string]any{"ok": false, "error": "chat_err_disabled"})
@@ -1657,7 +1657,7 @@ func (s *Server) handleChatSetServer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid peer", 400)
 		return
 	}
-	addr := strings.ToLower(strings.TrimSpace(req.Peer))
+	addr := client.ChatAddressString(peer)
 	h := s.chat
 	h.mu.Lock()
 	ps := h.servers[chatServerKey(req.Server)]
@@ -1738,7 +1738,7 @@ func (s *Server) handleChatPeerStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid peer", 400)
 		return
 	}
-	addr := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("peer")))
+	addr := client.ChatAddressString(peer)
 	ps := h.resolveServer(addr, r.URL.Query().Get("server"))
 	if ps == nil {
 		writeJSON(w, map[string]any{"ok": false, "error": "chat_err_disabled"})

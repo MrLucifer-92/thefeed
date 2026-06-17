@@ -608,7 +608,8 @@
     .tm-post-media {
       margin-top: 10px;
       display: grid;
-      gap: 4px
+      gap: 4px;
+      min-width: 0
     }
 
     /* Single photo: fill width, natural aspect, capped height. */
@@ -649,7 +650,8 @@
       border-radius: var(--radius-lg);
       overflow: hidden;
       background: #000;
-      border: 1px solid var(--border)
+      border: 1px solid var(--border);
+      min-width: 0
     }
 
     .tm-photo img {
@@ -1026,6 +1028,93 @@
 
     .tm-first-hint-text {
       white-space: pre-line
+    }
+
+    .tm-link-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: rgba(0,0,0,.45);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center
+    }
+
+    .tm-link-sheet {
+      background: var(--bg-elevated, var(--bg));
+      border-radius: 14px 14px 0 0;
+      width: 100%;
+      max-width: 480px;
+      padding: 18px 16px calc(env(safe-area-inset-bottom, 12px) + 12px);
+      box-shadow: 0 -4px 24px rgba(0,0,0,.25)
+    }
+
+    .tm-link-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: var(--text)
+    }
+
+    .tm-link-url {
+      font-size: 13px;
+      color: var(--text-dim);
+      word-break: break-all;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 14px;
+      user-select: all;
+      -webkit-user-select: all
+    }
+
+    .tm-link-actions {
+      display: flex;
+      gap: 8px
+    }
+
+    .tm-link-btn {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer
+    }
+
+    .tm-link-copy {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text)
+    }
+
+    .tm-link-open {
+      background: var(--accent);
+      color: #fff
+    }
+
+    @keyframes tm-highlight {
+      0% { background: color-mix(in oklab, var(--accent) 25%, transparent) }
+      100% { background: transparent }
+    }
+
+    .tm-post-highlight {
+      animation: tm-highlight 2s ease-out
+    }
+
+    .tm-link-add-ch {
+      width: 100%;
+      margin-top: 8px;
+      padding: 12px;
+      border: 1px dashed var(--accent);
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      background: transparent;
+      color: var(--accent)
     }
 
     /* END telemirror */

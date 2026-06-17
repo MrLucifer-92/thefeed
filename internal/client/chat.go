@@ -103,6 +103,16 @@ func ParseChatAddress(s string) ([protocol.AddressSize]byte, error) {
 	return addr, nil
 }
 
+// CanonicalChatAddress round-trips a user-supplied address through decode+encode
+// so padding bits are zeroed and the string is always the same for a given address.
+func CanonicalChatAddress(s string) (string, error) {
+	addr, err := ParseChatAddress(s)
+	if err != nil {
+		return "", err
+	}
+	return ChatAddressString(addr), nil
+}
+
 // ChatProgress reports upload/download progress: done out of total units.
 type ChatProgress func(done, total int)
 

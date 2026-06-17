@@ -613,13 +613,14 @@
       var pid = 'tmp_' + i;
       if (plain) tmPostText[pid] = plain;
 
-      html += '<div class="tm-post" data-pid="' + pid + '">';
+      // p.id looks like "channel/12345" — show only the numeric part.
+      var msgNum = (p.id || '').split('/').pop();
+
+      html += '<div class="tm-post" data-pid="' + pid + '" data-msgid="' + tmEscAttr(msgNum || '') + '">';
 
       // Head: author + msg id + edited + copy button. Time at the bottom.
       html += '<div class="tm-post-head">';
       if (ch.title) html += '<span class="tm-post-author">' + tmEsc(ch.title) + '</span>';
-      // p.id looks like "channel/12345" — show only the numeric part.
-      var msgNum = (p.id || '').split('/').pop();
       if (msgNum) html += '<span class="tm-post-msgid">#' + tmEsc(msgNum) + '</span>';
       if (p.edited) html += '<span class="tm-post-edited">' + tmEsc(tmI18n('telemirror_edited', 'edited')) + '</span>';
       if (plain) {
@@ -643,8 +644,10 @@
       if (p.reply) {
         var rAuth = p.reply.author ? tmEsc(p.reply.author) : '';
         var rText = p.reply.text || '';
+        var replyMsgId = (p.reply.url || '').replace(/.*\//, '') || '';
         html += '<div class="tm-post-reply"'
-          + (p.reply.url ? ' onclick="window.open(\'' + tmEscAttr(p.reply.url) + '\', \'_blank\')"' : '')
+          + (p.reply.url ? ' data-link="' + tmEscAttr(p.reply.url) + '"' : '')
+          + (replyMsgId ? ' data-reply-msgid="' + tmEscAttr(replyMsgId) + '"' : '')
           + (p.reply.url ? ' style="cursor:pointer"' : '')
           + '>';
         if (rAuth) html += '<div class="tm-post-reply-author">' + rAuth + '</div>';
@@ -688,6 +691,7 @@
       html += '</div>';
     }
     content.innerHTML = html;
+    tmNeuterLinks(content);
     // Jump to the bottom (newest message), like Telegram does on load.
     requestAnimationFrame(function () {
       content.scrollTop = content.scrollHeight;
@@ -933,5 +937,130 @@
     if (inp) inp.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') { e.preventDefault(); window.telemirrorAdd(); }
     });
+
+    // Intercept link clicks and long-press inside posts.
+    var tmC = document.getElementById('tmContent');
+    if (tmC) {
+      function tmLinkHandler(e) {
+        // Reply divs: scroll to replied-to post if loaded, else show link sheet
+        var rep = e.target.closest('[data-reply-msgid]');
+        if (rep) {
+          e.preventDefault(); e.stopPropagation();
+          var targetId = rep.getAttribute('data-reply-msgid');
+          var parentPost = rep.closest('.tm-post');
+          var currentId = parentPost ? parentPost.getAttribute('data-msgid') : '';
+          if (targetId && targetId !== currentId && tmScrollToPost(targetId)) return;
+          tmToast(tmI18n('telemirror_reply_not_loaded', 'Original message not loaded'));
+          return;
+        }
+        // data-href on neutered <a> tags
+        var a = e.target.closest('a[data-href]');
+        if (a) { e.preventDefault(); e.stopPropagation(); tmHandleLink(a.getAttribute('data-href')); return; }
+      }
+      tmC.addEventListener('click', tmLinkHandler);
+      tmC.addEventListener('contextmenu', tmLinkHandler);
+    }
   });
+
+  // Strip href from all <a> tags inside rendered posts so the browser/OS
+  // never navigates or shows "Open in Telegram?". The real URL is kept in
+  // data-href; the delegated click handler reads it.
+  function tmNeuterLinks(container) {
+    var links = container.querySelectorAll('a[href]');
+    for (var i = 0; i < links.length; i++) {
+      var a = links[i];
+      if (a.classList.contains('tm-photo-dl')) continue;
+      a.setAttribute('data-href', a.href);
+      a.removeAttribute('href');
+      a.removeAttribute('target');
+      a.style.cursor = 'pointer';
+    }
+  }
+
+  // Parse a t.me URL → { user, postId } or null.
+  function tmParseTgLink(url) {
+    var m = url.match(/^https?:\/\/(?:t\.me|telegram\.me)\/([A-Za-z_][A-Za-z0-9_]{3,31})(?:\/(\d+))?(?:[?#].*)?$/);
+    return m ? { user: m[1], postId: m[2] || '' } : null;
+  }
+
+  // Scroll to a post by its numeric message ID. Returns true if found.
+  function tmScrollToPost(msgId) {
+    if (!msgId) return false;
+    var el = document.querySelector('.tm-post[data-msgid="' + msgId + '"]');
+    if (!el) return false;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('tm-post-highlight');
+    setTimeout(function () { el.classList.remove('tm-post-highlight'); }, 2000);
+    return true;
+  }
+
+  // Central link handler — decides what to do with a URL from a post.
+  function tmHandleLink(url) {
+    var tg = tmParseTgLink(url);
+    // Same channel + post in view → just scroll to it
+    if (tg && tg.postId && tmActive && tg.user.toLowerCase() === tmActive.toLowerCase()) {
+      if (tmScrollToPost(tg.postId)) return;
+    }
+    tmShowLinkSheet(url);
+  }
+
+  window.tmShowLinkSheet = tmShowLinkSheet;
+  function tmShowLinkSheet(url) {
+    var old = document.getElementById('tmLinkSheet');
+    if (old) old.remove();
+    var tg = tmParseTgLink(url);
+    var overlay = document.createElement('div');
+    overlay.id = 'tmLinkSheet';
+    overlay.className = 'tm-link-overlay';
+    var html = '<div class="tm-link-sheet">'
+      + '<div class="tm-link-title">' + tmEsc(tmI18n('telemirror_open_this_link', 'Open this link?')) + '</div>'
+      + '<div class="tm-link-url" dir="ltr">' + tmEsc(url) + '</div>'
+      + '<div class="tm-link-actions">'
+      + '<button class="tm-link-btn tm-link-copy">' + tmEsc(tmI18n('telemirror_copy_link', 'Copy link')) + '</button>'
+      + '<button class="tm-link-btn tm-link-open">' + tmEsc(tmI18n('telemirror_open_link', 'Open in browser')) + '</button>'
+      + '</div>';
+    if (tg) {
+      html += '<button class="tm-link-btn tm-link-add-ch">'
+        + tmEsc(tmI18n('telemirror_add_channel', 'Add @{u} to channels').replace('{u}', tg.user))
+        + '</button>';
+    }
+    html += '</div>';
+    overlay.innerHTML = html;
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    overlay.querySelector('.tm-link-copy').onclick = function () {
+      try {
+        if (navigator.clipboard) { navigator.clipboard.writeText(url).catch(function () {}); }
+        else { var ta = document.createElement('textarea'); ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+      } catch (e) { /* clipboard unavailable */ }
+      tmToast(tmI18n('copied', 'Copied'));
+      overlay.remove();
+    };
+    overlay.querySelector('.tm-link-open').onclick = function () {
+      window.open(url, '_blank', 'noopener,noreferrer');
+      overlay.remove();
+    };
+    if (tg) {
+      overlay.querySelector('.tm-link-add-ch').onclick = async function () {
+        overlay.remove();
+        try {
+          var r = await fetch('/api/telemirror/channels', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'add', username: tg.user })
+          });
+          if (!r.ok) { tmToast(tmI18n('telemirror_invalid_user', 'Invalid username')); return; }
+          await tmLoadChannels();
+          // Switch to that channel and scroll to the post if specified
+          tmActive = tg.user;
+          tmSaveActive();
+          await tmSelect(tg.user);
+          if (tg.postId) setTimeout(function () { tmScrollToPost(tg.postId); }, 300);
+          tmToast(tmI18n('telemirror_channel_added', '@{u} added').replace('{u}', tg.user));
+        } catch (e) { tmToast((e && e.message) || 'failed'); }
+      };
+    }
+    document.body.appendChild(overlay);
+  }
 })();

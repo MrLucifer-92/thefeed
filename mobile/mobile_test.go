@@ -4,10 +4,30 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// testDir creates a temp directory whose cleanup tolerates background
+// goroutines that are still writing files (e.g. cache cleanup).
+func testDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "thefeed-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for range 3 {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+	return dir
+}
 
 func TestNewServerEmptyDir(t *testing.T) {
 	if _, err := NewServer("", 0); err == nil {
@@ -16,7 +36,7 @@ func TestNewServerEmptyDir(t *testing.T) {
 }
 
 func TestServerLifecycle(t *testing.T) {
-	dir := t.TempDir()
+	dir := testDir(t)
 	s, err := NewServer(dir, 0)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -43,7 +63,7 @@ func TestServerLifecycle(t *testing.T) {
 }
 
 func TestStopIsIdempotent(t *testing.T) {
-	s, err := NewServer(t.TempDir(), 0)
+	s, err := NewServer(testDir(t), 0)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -52,7 +72,7 @@ func TestStopIsIdempotent(t *testing.T) {
 }
 
 func TestStopReleasesPort(t *testing.T) {
-	dir := t.TempDir()
+	dir := testDir(t)
 	s, err := NewServer(dir, 0)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

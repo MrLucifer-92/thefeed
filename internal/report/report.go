@@ -126,7 +126,16 @@ func (a *aggregate) add(rep *hourlyReport) {
 	a.invalid += rep.Invalid
 	a.series = append(a.series, rep.Total)
 	if rep.ChatStats != nil {
-		a.lastChatStats = rep.ChatStats
+		if a.lastChatStats == nil {
+			a.lastChatStats = map[string]int64{}
+		}
+		for k, v := range rep.ChatStats {
+			if k == "accounts" {
+				a.lastChatStats[k] = v
+			} else {
+				a.lastChatStats[k] += v
+			}
+		}
 	}
 	if terr == nil {
 		a.hours[t.Hour()] += rep.Total

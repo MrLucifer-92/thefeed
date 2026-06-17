@@ -76,6 +76,15 @@ var CHAT_REFRESH_MIN_MS = 1000;    // min gap between pull refreshes
 
 function chatT(key) { return t(key) || key }
 
+var chatB32 = 'abcdefghijklmnopqrstuvwxyz234567';
+function chatCanonAddr(s) {
+  s = (s || '').trim().toLowerCase();
+  if (!/^[a-z2-7]{20}$/.test(s)) return '';
+  var last = chatB32.indexOf(s[19]);
+  if (last < 0) return '';
+  return s.slice(0, 19) + chatB32[last & 0x10];
+}
+
 function chatName(addr) {
   if (chatState.contacts[addr]) return chatState.contacts[addr];
   return addr.slice(0, 6) + '…' + addr.slice(-4);
@@ -885,9 +894,8 @@ async function chatToggleServer(key, on) {
 
 function chatStartNew() {
   var inp = document.getElementById('chatAddAddr');
-  var addr = (inp.value || '').trim().toLowerCase();
-  if (!addr) return;
-  if (!/^[a-z2-7]{20}$/.test(addr)) { showToast(chatT('chat_bad_address')); return }
+  var addr = chatCanonAddr(inp.value);
+  if (!addr) { showToast(chatT('chat_bad_address')); return }
   if (addr === (chatState.info && chatState.info.address)) { showToast(chatT('chat_bad_address')); return }
   var servers = chatUsableServers();
   if (!servers.length) { chatServerSheet(); return; } // turn on a server first
@@ -1327,7 +1335,23 @@ async function chatRenderThread() {
 
   // A popup may have opened during the await above — don't wipe it.
   if (chatOverlayOpen()) { chatState.renderPending = true; return; }
-  document.getElementById('chatModal').innerHTML = html;
+  var modal = document.getElementById('chatModal');
+  var liveFooter = hadFocus && !firstRender ? modal.querySelector('.chat-footer') : null;
+  if (liveFooter) {
+    var tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    var newTopbar = tmp.querySelector('.chat-topbar');
+    var newPollBar = tmp.querySelector('.chat-nextpoll-bar');
+    var newBodyWrap = tmp.querySelector('.chat-body-wrap');
+    var oldTopbar = modal.querySelector('.chat-topbar');
+    var oldPollBar = modal.querySelector('.chat-nextpoll-bar');
+    var oldBodyWrap = modal.querySelector('.chat-body-wrap');
+    if (oldTopbar && newTopbar) modal.replaceChild(newTopbar, oldTopbar);
+    if (oldPollBar && newPollBar) modal.replaceChild(newPollBar, oldPollBar);
+    if (oldBodyWrap && newBodyWrap) modal.replaceChild(newBodyWrap, oldBodyWrap);
+  } else {
+    modal.innerHTML = html;
+  }
   var chatWrap = document.querySelector('.chat-body-wrap');
   if (chatWrap) {
     if (typeof getBgPattern === 'function') {
@@ -1353,7 +1377,7 @@ async function chatRenderThread() {
   chatUpdateScrollBtn();
   // Restore the in-progress draft + caret before resizing the input.
   var inp = document.getElementById('chatInput');
-  if (inp) {
+  if (inp && !liveFooter) {
     inp.value = draft;
     if (draft && selStart != null) { try { inp.setSelectionRange(selStart, selEnd); } catch (e) { } }
   }
@@ -1373,10 +1397,10 @@ async function chatRenderThread() {
   }
   chatInputResize();
   chatUpdateCountdown();
-  if (inp && (firstRender || (hadFocus && !keepScroll))) {
+  if (inp && !liveFooter && (firstRender || (hadFocus && !keepScroll))) {
     try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
   }
-  if (inp) inp.addEventListener('blur', chatFlushPendingRender);
+  if (inp && !liveFooter) inp.addEventListener('blur', chatFlushPendingRender);
 }
 
 // chatUpdateScrollBtn shows the floating ↓ button while the user is scrolled up,
