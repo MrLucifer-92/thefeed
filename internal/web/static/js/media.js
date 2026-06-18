@@ -1459,7 +1459,9 @@ function renderMessages(msgs, gaps) {
       newMsgScrollDone = true;
       setTimeout(function () {
         var sep = document.getElementById('newMsgSep');
-        if (sep) sep.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Instant, not smooth: smooth-scroll animation janks the Android WebView
+        // compositor; an instant jump to the separator is reliable.
+        if (sep) sep.scrollIntoView({ block: 'start' });
       }, 100);
     } else if (wasAtBottom) {
       // Same separator, but the user is parked at the bottom — keep them

@@ -49,6 +49,11 @@
         height: 100%
       }
 
+      /* Instant pane swap, NO slide transition. A transform transition could be
+         interrupted (open then immediate Back, or a programmatic open) and
+         freeze halfway on the Android WebView compositor — the recurring "stuck
+         at ~50% channel / 50% list" hang. With no animation there is no halfway
+         state to freeze: the panes switch instantly. */
       .sidebar {
         position: absolute;
         top: 0;
@@ -57,8 +62,7 @@
         bottom: 0;
         width: 100%;
         z-index: 2;
-        transform: translateX(0);
-        transition: transform .25s ease
+        transform: translateX(0)
       }
 
       .chat-area {
@@ -68,8 +72,7 @@
         right: 0;
         bottom: 0;
         z-index: 1;
-        transform: translateX(100%);
-        transition: transform .25s ease
+        transform: translateX(100%)
       }
 
       .app.chat-open .sidebar {

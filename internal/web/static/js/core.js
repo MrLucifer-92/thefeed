@@ -130,6 +130,15 @@ function openSidebar() {
   chatIsOpen = false;
   document.getElementById('app').classList.remove('chat-open');
 }
+// feedBack: the content pane's back button. Remove chat-open directly — the feed
+// shares window.history with the messenger and telemirror (each with their own
+// push/popstate handling), so routing back through history.back() can land on a
+// foreign state and never clear chat-open, leaving the user stuck in a channel.
+// Direct removal always returns to the list.
+function feedBack() {
+  openSidebar();
+}
+window.feedBack = feedBack;
 window.addEventListener('popstate', function () {
   if (mobileQuery.matches && document.getElementById('app').classList.contains('chat-open')) {
     openSidebar();
