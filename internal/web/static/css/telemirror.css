@@ -169,6 +169,10 @@
         display: inline-flex
       }
 
+      /* Instant drawer, NO slide transition. The transform transition is
+         unpromoted and janky on Android WebView; promoting it with will-change
+         fixed nothing and blanked the post images (a WebView layerization bug).
+         Snapping open/closed is fast and side-effect-free. */
       .tm-sidebar {
         position: absolute;
         top: 0;
@@ -176,11 +180,6 @@
         width: 86%;
         max-width: 340px;
         z-index: 2;
-        transition: transform .22s ease;
-        /* Layer-promote so the slide is GPU-composited — without it the drawer's
-           content (channel list + avatars) repaints every frame, which is the
-           slow/janky open on Android WebView. */
-        will-change: transform;
         box-shadow: 0 0 0 rgba(0, 0, 0, .0)
       }
 
@@ -208,21 +207,17 @@
         box-shadow: -4px 0 24px rgba(0, 0, 0, .32)
       }
 
-      /* Fade via opacity, not background-color: opacity is compositor-only,
-         while animating background repaints the full screen every frame. */
       .tm-backdrop {
         display: block;
         position: absolute;
         inset: 0;
-        background: rgba(0, 0, 0, .42);
-        opacity: 0;
+        background: rgba(0, 0, 0, 0);
         pointer-events: none;
-        transition: opacity .22s ease;
         z-index: 1
       }
 
       .tm-sidebar.open~.tm-backdrop {
-        opacity: 1;
+        background: rgba(0, 0, 0, .42);
         pointer-events: auto
       }
     }
