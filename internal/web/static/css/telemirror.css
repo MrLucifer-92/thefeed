@@ -177,6 +177,10 @@
         max-width: 340px;
         z-index: 2;
         transition: transform .22s ease;
+        /* Layer-promote so the slide is GPU-composited — without it the drawer's
+           content (channel list + avatars) repaints every frame, which is the
+           slow/janky open on Android WebView. */
+        will-change: transform;
         box-shadow: 0 0 0 rgba(0, 0, 0, .0)
       }
 
@@ -204,18 +208,21 @@
         box-shadow: -4px 0 24px rgba(0, 0, 0, .32)
       }
 
+      /* Fade via opacity, not background-color: opacity is compositor-only,
+         while animating background repaints the full screen every frame. */
       .tm-backdrop {
         display: block;
         position: absolute;
         inset: 0;
-        background: rgba(0, 0, 0, 0);
+        background: rgba(0, 0, 0, .42);
+        opacity: 0;
         pointer-events: none;
-        transition: background .22s ease;
+        transition: opacity .22s ease;
         z-index: 1
       }
 
       .tm-sidebar.open~.tm-backdrop {
-        background: rgba(0, 0, 0, .42);
+        opacity: 1;
         pointer-events: auto
       }
     }
