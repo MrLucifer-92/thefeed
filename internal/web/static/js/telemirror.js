@@ -40,7 +40,11 @@
   // Scroll the active channel view to the latest (bottom) post.
   window.tmScrollToBottom = function () {
     var el = document.getElementById('tmContent');
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    var posts = el.querySelectorAll('.tm-post');
+    var last = posts[posts.length - 1];
+    if (last) { last.scrollIntoView({ block: 'end' }); }
+    else { el.scrollTop = el.scrollHeight; }
   };
 
   // Bind once on first open: toggle the scroll-down button when the
@@ -692,10 +696,19 @@
         var last = p[p.length - 1];
         if (!last) { content.scrollTop = content.scrollHeight; return; }
         last.scrollIntoView({ block: 'end' });
+        // Re-assert: content-visibility resolves heights lazily; on slower
+        // Android WebViews the first scrollIntoView may land before the
+        // browser finishes estimating. Two retries absorb that growth.
+        var retries = [150, 500];
         var pinned = content.scrollTop;
-        setTimeout(function () {
-          if (Math.abs(content.scrollTop - pinned) < 4) last.scrollIntoView({ block: 'end' });
-        }, 300);
+        retries.forEach(function (ms) {
+          setTimeout(function () {
+            if (Math.abs(content.scrollTop - pinned) < 4) {
+              last.scrollIntoView({ block: 'end' });
+              pinned = content.scrollTop;
+            }
+          }, ms);
+        });
       });
     }
   }
