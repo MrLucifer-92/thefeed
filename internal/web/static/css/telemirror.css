@@ -387,6 +387,11 @@
     }
 
     .tm-post {
+      /* Skip layout/paint of off-screen posts (keeps opening the feed fast).
+         Scroll-to-newest uses scrollIntoView on the last post, not scrollHeight,
+         since these estimated heights make scrollHeight unreliable. */
+      content-visibility: auto;
+      contain-intrinsic-size: auto 400px;
       max-width: 720px;
       width: 100%;
       margin: 0 auto;

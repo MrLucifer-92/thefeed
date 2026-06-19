@@ -66,12 +66,19 @@
     var origLabel = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = tmI18n('loading', 'Loading...'); }
 
-    // Anchor by scrollHeight delta. Prepending content makes the
-    // scrollHeight grow by P; we keep the same viewport content visible
-    // by setting scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight).
+    // Anchor on the post the user is currently viewing (the oldest one shown,
+    // nearest the button) by its real on-screen offset — a scrollHeight delta is
+    // unreliable under content-visibility, which gives off-screen posts estimated
+    // heights. After prepending, put that same post back at the same offset; the
+    // newly-loaded older posts sit above it.
     var scroller = document.getElementById('tmContent');
-    var oldHeight = scroller ? scroller.scrollHeight : 0;
-    var oldTop = scroller ? scroller.scrollTop : 0;
+    var cur = window._tmCurrentPosts || [];
+    var anchorId = (cur[0] && cur[0].id || '').split('/').pop();
+    var anchorOffset = 0;
+    if (scroller && anchorId) {
+      var a0 = scroller.querySelector('.tm-post[data-msgid="' + anchorId + '"]');
+      if (a0) anchorOffset = a0.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    }
 
     fetch('/api/telemirror/older/' + encodeURIComponent(tmActive) + '?before=' + encodeURIComponent(beforeId))
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); })
@@ -88,32 +95,14 @@
           if (id) seen[id] = true;
           out.push(merged[i]);
         }
-        tmRenderPosts({ channel: window._tmCurrentChannel, posts: out });
-        if (!scroller) return;
-        // Restore on next frame so layout has flushed. Re-correct as
-        // each prepended image loads, but only as long as the user
-        // hasn't scrolled away from where we put them — otherwise we'd
-        // keep yanking their scroll back for several seconds.
-        var lastFixedTop = -1;
-        var stopAdjusting = false;
-        var fix = function () {
-          if (stopAdjusting) return;
-          if (lastFixedTop !== -1 && Math.abs(scroller.scrollTop - lastFixedTop) > 6) {
-            stopAdjusting = true;
-            return;
-          }
-          scroller.scrollTop = oldTop + (scroller.scrollHeight - oldHeight);
-          lastFixedTop = scroller.scrollTop;
-        };
+        tmRenderPosts({ channel: window._tmCurrentChannel, posts: out, keepScroll: true });
+        if (!scroller || !anchorId) return;
         requestAnimationFrame(function () {
-          fix();
-          var imgs = scroller.querySelectorAll('img');
-          for (var k = 0; k < imgs.length; k++) {
-            if (!imgs[k].complete) {
-              imgs[k].addEventListener('load', fix, { once: true });
-              imgs[k].addEventListener('error', fix, { once: true });
-            }
-          }
+          var el = scroller.querySelector('.tm-post[data-msgid="' + anchorId + '"]');
+          if (!el) return;
+          el.scrollIntoView();
+          var nowOffset = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+          scroller.scrollTop += (nowOffset - anchorOffset);
         });
       })
       .catch(function () {
@@ -692,10 +681,23 @@
     }
     content.innerHTML = html;
     tmNeuterLinks(content);
-    // Jump to the bottom (newest message), like Telegram does on load.
-    requestAnimationFrame(function () {
-      content.scrollTop = content.scrollHeight;
-    });
+    // Jump to the newest (bottom) post. content-visibility gives off-screen
+    // posts estimated heights, so scrollHeight is unreliable — scrollIntoView on
+    // the last post force-renders it and lands accurately. Re-assert once to
+    // absorb the height growth as the newest posts' images load, unless the user
+    // has already scrolled. Skipped for "load older", which keeps its own anchor.
+    if (!data.keepScroll) {
+      requestAnimationFrame(function () {
+        var p = content.querySelectorAll('.tm-post');
+        var last = p[p.length - 1];
+        if (!last) { content.scrollTop = content.scrollHeight; return; }
+        last.scrollIntoView({ block: 'end' });
+        var pinned = content.scrollTop;
+        setTimeout(function () {
+          if (Math.abs(content.scrollTop - pinned) < 4) last.scrollIntoView({ block: 'end' });
+        }, 300);
+      });
+    }
   }
 
   // Format a timestamp for display. Persian users see Jalali calendar
