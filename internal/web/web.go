@@ -2,30 +2,21 @@ package web
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
 	"embed"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
-	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sartoopjj/thefeed/internal/client"
 	"github.com/sartoopjj/thefeed/internal/protocol"
-	"github.com/sartoopjj/thefeed/internal/update"
 	"github.com/sartoopjj/thefeed/internal/version"
 )
 
@@ -34,11 +25,19 @@ var staticFS embed.FS
 
 // Config holds the client configuration saved in the data directory.
 type Config struct {
-	Domain    string   `json:"domain"`
-	Key       string   `json:"key"`
-	Resolvers []string `json:"resolvers"`
-	QueryMode string   `json:"queryMode"`
-	RateLimit float64  `json:"rateLimit"`
+	Domain string `json:"domain"`
+	// ExtraDomains are additional sub-domains the server also answers feed
+	// queries on; the client spreads block fetches across the main domain +
+	// these (main stays canonical for relay paths). From the d= URI field.
+	ExtraDomains []string `json:"extraDomains,omitempty"`
+	Key          string   `json:"key"`
+	Resolvers    []string `json:"resolvers"`
+	// ServerKey is the pinned server signing public key (base64url, the sk=
+	// field of a thefeed:// URI). When set, the client verifies feed content
+	// against the server's signed ExtraBlocks. Empty = unverified (old config).
+	ServerKey string  `json:"serverKey,omitempty"`
+	QueryMode string  `json:"queryMode"`
+	RateLimit float64 `json:"rateLimit"`
 	// Timeout is the per-query DNS timeout in seconds (0 = default 15 s).
 	// Also used as the resolver health-check probe timeout.
 	Timeout float64 `json:"timeout,omitempty"`
@@ -57,6 +56,9 @@ type Profile struct {
 	Config             Config   `json:"config"`
 	AutoUpdate         []string `json:"autoUpdate,omitempty"`
 	AutoUpdateInterval int      `json:"autoUpdateInterval,omitempty"`
+	// PinnedChannels stores the user's pinned channel names (stripped of @).
+	// Pinned channels render at the top of each section in the sidebar.
+	PinnedChannels []string `json:"pinnedChannels,omitempty"`
 }
 
 const (
@@ -99,6 +101,8 @@ type ProfileList struct {
 	Debug    bool   `json:"debug,omitempty"`
 	Theme    string `json:"theme,omitempty"`
 	Lang     string `json:"lang,omitempty"`
+	// SkipUpdateVersion is the latest release the user dismissed.
+	SkipUpdateVersion string `json:"skipUpdateVersion,omitempty"`
 	// ResolverBank is the shared pool of DNS resolvers used by all profiles.
 	ResolverBank []string `json:"resolverBank,omitempty"`
 	// ResolverScores stores accumulated performance data for bank resolvers.
@@ -122,6 +126,75 @@ type ProfileList struct {
 	// ProfilePicsEnabled enables fetching avatars over DNS when the
 	// GitHub relay can't serve them. Off by default.
 	ProfilePicsEnabled bool `json:"profilePicsEnabled,omitempty"`
+
+	// Connection settings (formerly per-profile). 0 = use default.
+	QueryMode string  `json:"queryMode,omitempty"` // "single" or "double"
+	RateLimit float64 `json:"rateLimit,omitempty"` // parallel block fetches
+	Scatter   int     `json:"scatter,omitempty"`   // resolvers per block
+	Timeout   float64 `json:"timeout,omitempty"`   // DNS query timeout (s)
+
+	// CacheBudgetMB is the disk-cache byte budget in megabytes (0 = default 1024).
+	// Applies to media-cache and telemirror images combined. saved-media is exempt.
+	CacheBudgetMB int `json:"cacheBudgetMB,omitempty"`
+
+	// ResolverCacheShare gates the shared-resolver-cache feature. Pointer
+	// (not plain bool) so we can tell "user never set it" (nil → default
+	// on) apart from "user explicitly disabled" (false). New installs and
+	// upgrades from before this field existed get the feature on; an
+	// explicit opt-out persists across restarts.
+	ResolverCacheShare *bool `json:"resolverCacheShare,omitempty"`
+
+	// SeenIDs maps channel name → last-seen message ID. It's the baseline
+	// for the per-channel unread-count badge. Persisted server-side so the
+	// counts survive the client's loopback port changing (which wipes the
+	// WebView localStorage these markers used to live in).
+	SeenIDs map[string]int64 `json:"seenIds,omitempty"`
+	// SeenHashes maps channel name → last-seen content hash, used for the
+	// X/Twitter "NEW" badge where message IDs aren't sequential.
+	SeenHashes map[string]int64 `json:"seenHashes,omitempty"`
+}
+
+// ShareEnabled returns whether the shared-resolver-cache feature is on.
+// Default is on; only an explicit *false disables it.
+func (pl *ProfileList) ShareEnabled() bool {
+	if pl == nil || pl.ResolverCacheShare == nil {
+		return true
+	}
+	return *pl.ResolverCacheShare
+}
+
+// Defaults for the connection settings exposed on the settings page.
+const (
+	defaultQueryMode = "single"
+	defaultRateLimit = 10.0
+	defaultScatter   = 6
+	defaultTimeout   = 10.0
+)
+
+// connectionSettings returns the effective values from pl, substituting
+// defaults for any zero field. Centralises the fallback so every place
+// that builds a fetcher reads the same numbers.
+func connectionSettings(pl *ProfileList) (queryMode string, rateLimit float64, scatter int, timeout float64) {
+	queryMode = defaultQueryMode
+	rateLimit = defaultRateLimit
+	scatter = defaultScatter
+	timeout = defaultTimeout
+	if pl == nil {
+		return
+	}
+	if pl.QueryMode != "" {
+		queryMode = pl.QueryMode
+	}
+	if pl.RateLimit > 0 {
+		rateLimit = pl.RateLimit
+	}
+	if pl.Scatter > 0 {
+		scatter = pl.Scatter
+	}
+	if pl.Timeout > 0 {
+		timeout = pl.Timeout
+	}
+	return
 }
 
 // lastScanData is the on-disk structure for last_scan.json.
@@ -146,6 +219,11 @@ type Server struct {
 	port     int
 	host     string
 	password string // admin password; empty means no auth
+	// sharedBackend marks a multi-user deployment (e.g. --host 0.0.0.0 with
+	// --shared). The UI then keeps unread/seen state per-browser in
+	// localStorage instead of the shared server profiles.json, so connected
+	// users don't clear each other's unread counts.
+	sharedBackend bool
 
 	mu               sync.RWMutex
 	config           *Config
@@ -154,6 +232,7 @@ type Server struct {
 	channels         []protocol.ChannelInfo
 	messages         map[int][]protocol.Message
 	telegramLoggedIn bool
+	chatAvailable    bool // server advertises the messenger (metadata flag bit)
 	nextFetch        uint32
 	latestVersion    string
 	lastMsgIDs       map[int]uint32 // last seen message IDs per channel
@@ -210,6 +289,14 @@ type Server struct {
 	// fetch. Entries expire after 7 days.
 	mediaCache *mediaDiskCache
 
+	// savedMedia is a never-reaped disk store (ttl=0) for media bytes that
+	// belong to saved messages, so they survive mediaCache TTL reaping.
+	savedMedia *mediaDiskCache
+
+	// savedCrypto seals the Saved store (saved.json) and saved-media blobs at
+	// rest. nil only in legacy unit tests that construct Server{} directly.
+	savedCrypto *savedCrypto
+
 	// rescanReplaceList: set by handleRescan, consumed (and cleared)
 	// by the next SetOnScanDone callback so an explicit user rescan
 	// overwrites the selected list instead of just topping it up.
@@ -218,12 +305,47 @@ type Server struct {
 
 	// profilesMu serialises read-modify-write cycles on profiles.json.
 	profilesMu sync.Mutex
+	// savedMu serialises read-modify-write cycles on the Saved store and guards
+	// the s.savedCrypto pointer + its mutable fields. RWMutex so the lock-state
+	// reads on the hot path (handleSavedList etc.) don't serialise behind a slow
+	// Argon2 setPassphrase. NEVER take the read lock while already holding the
+	// write lock (Go RWMutex isn't reentrant) — the store helpers below hold the
+	// write lock, so guard at handler entry, before calling them.
+	savedMu sync.RWMutex
 
 	// Optional, removable backup feed (Telegram-via-Translate proxy).
 	telemirror *telemirrorHub
 
 	// Optional per-channel profile pictures cache.
 	profilePics *profilePicsHub
+
+	// chat is the standalone messenger hub (identity, threads, poll loop).
+	chat *chatHub
+
+	// newMsgMu guards newMsgHandler, an optional callback the background chat
+	// poll loop invokes when it finds new messages. The mobile bind layer wires
+	// it to a native notifier so backgrounded apps can post a system
+	// notification (the in-app, foreground case is handled by the web UI).
+	newMsgMu      sync.Mutex
+	newMsgHandler func(count int)
+}
+
+// SetNewMessageHandler registers a callback invoked (off the UI path) whenever
+// the background chat poll loop discovers new messages. Pass nil to clear.
+func (s *Server) SetNewMessageHandler(fn func(count int)) {
+	s.newMsgMu.Lock()
+	s.newMsgHandler = fn
+	s.newMsgMu.Unlock()
+}
+
+// notifyNewMessages fires the registered new-message handler, if any.
+func (s *Server) notifyNewMessages(count int) {
+	s.newMsgMu.Lock()
+	fn := s.newMsgHandler
+	s.newMsgMu.Unlock()
+	if fn != nil {
+		fn(count)
+	}
 }
 
 // New creates a new web server.
@@ -260,13 +382,37 @@ func New(dataDir string, port int, host string, password string) (*Server, error
 		mediaCache:     mediaCache,
 		dlProgress:     make(map[string]*mediaDLProgress),
 		relayInfo:      newRelayCache(),
-		telemirror:     newTelemirrorHub(dataDir),
 		profilePics:    newProfilePicsHub(dataDir),
 	}
+	// Set up telemirror with an onUpdate hook so background refreshes
+	// push an SSE event; the frontend re-fetches the active channel
+	// when it sees the matching event.
+	s.telemirror = newTelemirrorHub(dataDir, func(username string) {
+		s.broadcast("event: update\ndata: \"telemirror:" + username + "\"\n\n")
+	})
+	s.chat = newChatHub(s, dataDir)
 
 	if mediaCache != nil {
 		go mediaCache.Cleanup()
 		go s.runMediaCacheSweep()
+	}
+
+	// Saved store at-rest encryption: load or initialise the keyring (device
+	// mode on first run). If this fails the Saved feature degrades to plaintext
+	// rather than blocking startup.
+	if sc, scErr := loadSavedCrypto(dataDir); scErr == nil {
+		s.savedCrypto = sc
+	}
+
+	// saved-media never expires (ttl=0): saved messages keep their bytes.
+	if savedMedia, smErr := newMediaDiskCache(filepath.Join(dataDir, "saved-media"), 0); smErr == nil {
+		savedMedia.crypto = s.savedCrypto
+		s.savedMedia = savedMedia
+	}
+
+	// Apply cache budget from saved preferences.
+	if pl, plErr := s.loadProfiles(); plErr == nil && pl != nil {
+		s.applyCacheBudget(pl.CacheBudgetMB)
 	}
 
 	// Migrate per-profile resolvers into the shared bank on first run.
@@ -327,12 +473,19 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/events", s.handleSSE)
 	mux.HandleFunc("/api/profiles", s.handleProfiles)
 	mux.HandleFunc("/api/profiles/switch", s.handleProfileSwitch)
+	mux.HandleFunc("/api/profiles/defaults", s.handleProfileDefaults)
 	mux.HandleFunc("/api/auto-update", s.handleAutoUpdate)
 	mux.HandleFunc("/api/auto-update/toggle", s.handleAutoUpdateToggle)
+	mux.HandleFunc("/api/pinned-channels/toggle", s.handlePinnedChannelToggle)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/seen", s.handleSeen)
 	mux.HandleFunc("/api/version-check", s.handleVersionCheck)
 	mux.HandleFunc("/api/update/github", s.handleGitHubUpdateCheck)
+	mux.HandleFunc("/api/update/download", s.handleUpdateDownload)
 	mux.HandleFunc("/api/cache/clear", s.handleClearCache)
+	mux.HandleFunc("/api/cache/stats", s.handleCacheStats)
+	mux.HandleFunc("/api/cache/clear-one", s.handleCacheClearOne)
+	mux.HandleFunc("/api/cache/budget", s.handleCacheBudget)
 	mux.HandleFunc("/api/bg-image", s.handleBgImage)
 	mux.HandleFunc("/api/resolvers/apply-saved", s.handleApplySavedResolvers)
 	mux.HandleFunc("/api/resolvers/active", s.handleActiveResolvers)
@@ -357,11 +510,43 @@ func (s *Server) serve(ln net.Listener) error {
 	// contract.
 	mux.HandleFunc("/api/media/get", s.handleMediaGet)
 	mux.HandleFunc("/api/media/progress", s.handleMediaProgress)
+	mux.HandleFunc("/api/saved", s.handleSaved)
+	mux.HandleFunc("/api/saved/note", s.handleSavedNote)
+	mux.HandleFunc("/api/saved/upload", s.handleSavedUpload)
+	mux.HandleFunc("/api/saved/from-chat", s.handleSavedFromChat)
+	mux.HandleFunc("/api/saved/lock", s.handleSavedLock)
+	mux.HandleFunc("/api/saved/lock/remove", s.handleSavedLockRemove)
+	mux.HandleFunc("/api/saved/lock/reset", s.handleSavedLockReset)
+	mux.HandleFunc("/api/saved/unlock", s.handleSavedUnlock)
+	mux.HandleFunc("/api/saved/pin", s.handleSavedPin)
+	mux.HandleFunc("/api/saved/count", s.handleSavedCount)
+	mux.HandleFunc("/api/saved/seen", s.handleSavedSeen)
+	mux.HandleFunc("/api/saved/media", s.handleSavedMedia)
+	mux.HandleFunc("/api/saved/media/persist", s.handleSavedMediaPersist)
+	mux.HandleFunc("/api/saved/media/persist-tm", s.handleSavedMediaPersistTm)
+	mux.HandleFunc("/api/saved/media/upload-blob", s.handleSavedMediaUploadBlob)
 	// Optional telemirror feature — see internal/telemirror/.
 	mux.HandleFunc("/api/telemirror/channels", s.telemirror.handleChannels)
 	mux.HandleFunc("/api/telemirror/channel/", s.telemirror.handleChannel)
 	mux.HandleFunc("/api/telemirror/img", s.telemirror.handleImg)
 	mux.HandleFunc("/api/telemirror/avatar/", s.telemirror.handleAvatar)
+	mux.HandleFunc("/api/telemirror/older/", s.telemirror.handleOlder)
+	// Chat messenger endpoints — see handlers_chat.go.
+	mux.HandleFunc("/api/chat/info", s.handleChatInfo)
+	mux.HandleFunc("/api/chat/availability", s.handleChatAvailability)
+	mux.HandleFunc("/api/chat/servers", s.handleChatServers)
+	mux.HandleFunc("/api/chat/probe", s.handleChatProbeServer)
+	mux.HandleFunc("/api/chat/enable", s.handleChatEnable)
+	mux.HandleFunc("/api/chat/seed", s.handleChatSeed)
+	mux.HandleFunc("/api/chat/contacts", s.handleChatContacts)
+	mux.HandleFunc("/api/chat/threads", s.handleChatThreads)
+	mux.HandleFunc("/api/chat/thread", s.handleChatThread)
+	mux.HandleFunc("/api/chat/messages", s.handleChatMessages)
+	mux.HandleFunc("/api/chat/setserver", s.handleChatSetServer)
+	mux.HandleFunc("/api/chat/send", s.handleChatSend)
+	mux.HandleFunc("/api/chat/poll", s.handleChatPoll)
+	mux.HandleFunc("/api/chat/peer-status", s.handleChatPeerStatus)
+	mux.HandleFunc("/api/chat/settings", s.handleChatSettings)
 	// Profile-pics cache + control endpoints.
 	mux.HandleFunc("/api/profile-pics/", s.profilePics.handleProfilePic)
 	mux.HandleFunc("/api/profile-pics", s.handleProfilePicsList)
@@ -402,6 +587,7 @@ func (s *Server) serve(ln net.Listener) error {
 	var handler http.Handler = mux
 	if s.password != "" {
 		pw := s.password
+		inner := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, pass, ok := r.BasicAuth()
 			if !ok || subtle.ConstantTimeCompare([]byte(pass), []byte(pw)) != 1 {
@@ -409,9 +595,10 @@ func (s *Server) serve(ln net.Listener) error {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
-			mux.ServeHTTP(w, r)
+			inner.ServeHTTP(w, r)
 		})
 	}
+	handler = sameOriginGuard(handler)
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -431,6 +618,31 @@ func (s *Server) serve(ln net.Listener) error {
 	return srv.ListenAndServe()
 }
 
+// sameOriginGuard blocks cross-site STATE-CHANGING requests, the CSRF/DNS-
+// rebinding vector against this localhost UI: a hostile web page the user is
+// also visiting could otherwise POST to 127.0.0.1 and drive chat/admin actions
+// (e.g. enabling a chat server, sending a message). It keys off the browser-set
+// Fetch-Metadata header, which is sent on every request and cannot be forged by
+// the calling page:
+//   - "cross-site" on an unsafe method → reject.
+//   - same-origin / same-site / none (direct navigation), or no header at all
+//     (curl, native/mobile clients, the in-app webview's own calls) → allow.
+//
+// Reads (GET/HEAD) are never blocked, so no legitimate same-origin flow breaks.
+func sameOriginGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				http.Error(w, "cross-site request blocked", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -443,396 +655,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(data)
-}
-
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	status := map[string]any{
-		"configured":  s.config != nil,
-		"version":     version.Version,
-		"hasPassword": s.password != "",
-	}
-	if s.config != nil {
-		status["domain"] = s.config.Domain
-		status["channels"] = s.channels
-		status["telegramLoggedIn"] = s.telegramLoggedIn
-		status["nextFetch"] = s.nextFetch
-		status["latestVersion"] = s.latestVersion
-		// Include last resolver scan if recent (<24 h) so the frontend can offer a quick-start.
-		if ls := s.loadLastScan(); ls != nil {
-			status["lastScan"] = map[string]any{
-				"resolvers": ls.Resolvers,
-				"scannedAt": ls.ScannedAt,
-				"count":     len(ls.Resolvers),
-			}
-		}
-	}
-	writeJSON(w, status)
-}
-
-// handleConfig handles GET (read) and POST (write) of client configuration.
-// POST is authenticated when a global password is set (via the middleware).
-func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		if s.config == nil {
-			writeJSON(w, map[string]any{"configured": false})
-			return
-		}
-		writeJSON(w, s.config)
-
-	case http.MethodPost:
-		var cfg Config
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-			http.Error(w, "invalid JSON", 400)
-			return
-		}
-		if cfg.Domain == "" || cfg.Key == "" || len(cfg.Resolvers) == 0 {
-			http.Error(w, "domain, key, and resolvers are required", 400)
-			return
-		}
-		// Add config resolvers to the shared bank.
-		if len(cfg.Resolvers) > 0 {
-			pl, _ := s.loadProfiles()
-			if pl == nil {
-				pl = &ProfileList{}
-			}
-			addToBank(pl, cfg.Resolvers)
-			_ = s.saveProfiles(pl)
-		}
-		if err := s.saveConfig(&cfg); err != nil {
-			http.Error(w, fmt.Sprintf("save config: %v", err), 500)
-			return
-		}
-		s.mu.Lock()
-		s.config = &cfg
-		s.mu.Unlock()
-
-		if err := s.initFetcher(); err != nil {
-			http.Error(w, fmt.Sprintf("init fetcher: %v", err), 500)
-			return
-		}
-		s.startCheckerThenRefresh()
-		writeJSON(w, map[string]any{"ok": true})
-
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
-func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	writeJSON(w, s.channels)
-}
-
-func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) < 4 {
-		http.Error(w, "missing channel number", 400)
-		return
-	}
-	chNum, err := strconv.Atoi(parts[3])
-	if err != nil || chNum < 1 {
-		http.Error(w, "invalid channel number", 400)
-		return
-	}
-
-	s.mu.RLock()
-	msgs := s.messages[chNum]
-	chs := s.channels
-	cache := s.cache
-	s.mu.RUnlock()
-
-	// Serve the persistent on-disk cache when available —
-	// it contains the full merged history (up to 200 messages) keyed by channel name.
-	if cache != nil && chNum >= 1 && chNum <= len(chs) {
-		if result := cache.GetMessages(chs[chNum-1].Name); result != nil {
-			writeJSON(w, result)
-			return
-		}
-	}
-
-	// Fall back to the in-memory fresh fetch (no accumulated history).
-	writeJSON(w, client.NewMessagesResult(msgs))
-}
-
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	// Background (quiet) metadata-only refreshes skip silently if one is already running,
-	// so the auto-refresh timer never cancels a slow in-progress fetch.
-	// Channel refreshes are NOT skipped here — refreshChannel has its own duplicate guard.
-	chParam := r.URL.Query().Get("channel")
-	if r.URL.Query().Get("quiet") == "1" && chParam == "" {
-		s.refreshMu.Lock()
-		running := len(s.refreshCancels) > 0
-		s.refreshMu.Unlock()
-		if running {
-			writeJSON(w, map[string]any{"ok": true, "skipped": true})
-			return
-		}
-	}
-	if chParam != "" {
-		chNum, err := strconv.Atoi(chParam)
-		if err != nil || chNum < 1 {
-			http.Error(w, "invalid channel", 400)
-			return
-		}
-		go s.refreshChannel(chNum)
-	} else {
-		go s.refreshMetadataOnly()
-	}
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	s.mu.RLock()
-	checker := s.checker
-	fetcher := s.fetcher
-	baseCtx := s.fetcherCtx
-	s.mu.RUnlock()
-	if checker == nil || baseCtx == nil {
-		http.Error(w, "not configured", 400)
-		return
-	}
-	// Widen the fetcher's pool to the full bank so we probe every
-	// known resolver, not just the currently-active subset.
-	// rescanReplaceList tells SetOnScanDone to overwrite the list.
-	pl, _ := s.loadProfiles()
-	if pl != nil && len(pl.ResolverBank) > 0 && fetcher != nil {
-		fetcher.UpdateResolverPool(pl.ResolverBank)
-	}
-	s.rescanFlagMu.Lock()
-	s.rescanReplaceList = true
-	s.rescanFlagMu.Unlock()
-
-	go func() {
-		// Cancel any in-progress metadata refresh so it doesn't race with the
-		// scan — we want fresh resolver data before we hit DNS again.
-		s.refreshMu.Lock()
-		for k, cancel := range s.refreshCancels {
-			cancel()
-			delete(s.refreshCancels, k)
-		}
-		s.refreshMu.Unlock()
-
-		if checker.CheckNow(baseCtx) {
-			// Cool-down: give resolvers time to recover from the scan's DNS
-			// queries before we immediately hit them again with a fetch.
-			sleep := 3*time.Second + time.Duration(mrand.IntN(13))*time.Second // 3–15 s
-			select {
-			case <-baseCtx.Done():
-				return
-			case <-time.After(sleep):
-			}
-			s.refreshMetadataOnly()
-		}
-	}()
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-
-	var req struct {
-		Channel int    `json:"channel"`
-		Text    string `json:"text"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", 400)
-		return
-	}
-	if req.Channel < 1 || req.Text == "" {
-		http.Error(w, "channel and text are required", 400)
-		return
-	}
-	if len(req.Text) > 4000 {
-		http.Error(w, "message too long (max 4000 chars)", 400)
-		return
-	}
-
-	s.mu.RLock()
-	fetcher := s.fetcher
-	basectx := s.fetcherCtx
-	s.mu.RUnlock()
-
-	if fetcher == nil || basectx == nil {
-		http.Error(w, "not configured", 400)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(basectx, 5*time.Minute)
-	defer cancel()
-
-	s.addLog(fmt.Sprintf("Sending message to channel %d (%d chars)...", req.Channel, len(req.Text)))
-
-	if err := fetcher.SendMessage(ctx, req.Channel, req.Text); err != nil {
-		log.Printf("[web] send error ch=%d: %v", req.Channel, err)
-		s.addLog("Error: failed to send message")
-		http.Error(w, "failed to send message", 500)
-		return
-	}
-
-	s.addLog("Message sent successfully")
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-
-	var req struct {
-		Command string `json:"command"`
-		Arg     string `json:"arg"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", 400)
-		return
-	}
-	if req.Command == "" {
-		http.Error(w, "command is required", 400)
-		return
-	}
-
-	s.mu.RLock()
-	fetcher := s.fetcher
-	basectx := s.fetcherCtx
-	s.mu.RUnlock()
-
-	if fetcher == nil || basectx == nil {
-		http.Error(w, "not configured", 400)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(basectx, 5*time.Minute)
-	defer cancel()
-
-	s.addLog(fmt.Sprintf("Admin command: %s %s", req.Command, req.Arg))
-
-	var cmd protocol.AdminCmd
-	switch req.Command {
-	case "add_channel":
-		cmd = protocol.AdminCmdAddChannel
-	case "remove_channel":
-		cmd = protocol.AdminCmdRemoveChannel
-	case "list_channels":
-		cmd = protocol.AdminCmdListChannels
-	case "refresh":
-		cmd = protocol.AdminCmdRefresh
-	default:
-		http.Error(w, "unknown command", 400)
-		return
-	}
-
-	result, err := fetcher.SendAdminCommand(ctx, cmd, req.Arg)
-	if err != nil {
-		log.Printf("[web] admin error: %v", err)
-		s.addLog(fmt.Sprintf("Admin error: %v", err))
-		http.Error(w, "admin command failed", 500)
-		return
-	}
-
-	s.addLog(fmt.Sprintf("Admin result: %s", result))
-	writeJSON(w, map[string]any{"ok": true, "result": result})
-}
-
-func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", 500)
-		return
-	}
-
-	// Disable the server-wide WriteTimeout for this long-lived SSE connection.
-	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Time{})
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	ch := make(chan string, 500)
-	s.sseMu.Lock()
-	s.clients[ch] = struct{}{}
-	s.sseMu.Unlock()
-
-	defer func() {
-		s.sseMu.Lock()
-		delete(s.clients, ch)
-		s.sseMu.Unlock()
-	}()
-
-	s.logMu.RLock()
-	for _, line := range s.logLines {
-		data, _ := json.Marshal(line)
-		fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
-	}
-	s.logMu.RUnlock()
-	flusher.Flush()
-
-	ctx := r.Context()
-	ping := time.NewTicker(30 * time.Second)
-	defer ping.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ping.C:
-			// SSE comment line as heartbeat — keeps the connection alive and
-			// lets us detect a dead client (write error).
-			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-		case msg := <-ch:
-			if _, err := fmt.Fprint(w, msg); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-	}
-}
-
-func (s *Server) broadcast(event string) {
-	s.sseMu.Lock()
-	defer s.sseMu.Unlock()
-	for ch := range s.clients {
-		select {
-		case ch <- event:
-		default:
-		}
-	}
-}
-
-func (s *Server) addLog(msg string) {
-	ts := time.Now().Format("15:04:05")
-	line := fmt.Sprintf("%s %s", ts, msg)
-
-	s.logMu.Lock()
-	s.logLines = append(s.logLines, line)
-	if len(s.logLines) > 200 {
-		s.logLines = s.logLines[len(s.logLines)-200:]
-	}
-	s.logMu.Unlock()
-
-	data, _ := json.Marshal(line)
-	s.broadcast(fmt.Sprintf("event: log\ndata: %s\n\n", data))
 }
 
 func (s *Server) initFetcher() error {
@@ -885,6 +707,14 @@ func (s *Server) initFetcher() error {
 	if err != nil {
 		return fmt.Errorf("create fetcher: %w", err)
 	}
+	if len(cfg.ExtraDomains) > 0 {
+		fetcher.SetDomains(cfg.ExtraDomains)
+	}
+	if cfg.ServerKey != "" {
+		if err := fetcher.SetServerPublicKey(cfg.ServerKey); err != nil {
+			s.addLog("[verify] invalid server key in config: " + err.Error())
+		}
+	}
 
 	// Restore resolver stats: prefer in-memory stats from the previous fetcher,
 	// fall back to persisted scores for fresh starts.
@@ -902,23 +732,24 @@ func (s *Server) initFetcher() error {
 		fetcher.ImportStats(m)
 	}
 
-	if cfg.QueryMode == "double" {
+	// Connection settings are global (live on ProfileList). Defaults
+	// apply when fields are zero/empty.
+	pl, _ := s.loadProfiles()
+	qm, rl, sc, to := connectionSettings(pl)
+	if qm == "double" {
 		fetcher.SetQueryMode(protocol.QueryMultiLabel)
 	}
 	fetcher.SetDebug(debug)
 	s.scanner.SetDebug(debug)
-	if cfg.RateLimit > 0 {
-		fetcher.SetRateLimit(cfg.RateLimit)
+	if rl > 0 {
+		fetcher.SetRateLimit(rl)
 	}
-	if cfg.Scatter > 1 {
-		fetcher.SetScatter(cfg.Scatter)
+	if sc > 1 {
+		fetcher.SetScatter(sc)
 	}
-
-	timeout := 15 * time.Second
-	if cfg.Timeout > 0 {
-		timeout = time.Duration(cfg.Timeout * float64(time.Second))
-	}
+	timeout := time.Duration(to * float64(time.Second))
 	fetcher.SetTimeout(timeout)
+	fetcher.SetCacheShare(pl.ShareEnabled())
 
 	fetcher.SetLogFunc(func(msg string) {
 		s.addLog(msg)
@@ -956,2729 +787,72 @@ func (s *Server) initFetcher() error {
 	// Goroutine dies with fetcherCtx, so a profile switch / config change
 	// stops it cleanly.
 	go s.runAutoUpdateLoop(ctx)
-	return nil
-}
 
-// runAutoUpdateLoop refreshes the active profile's AutoUpdate channels on a
-// schedule that follows the server's own fetch cycle — there's no point
-// polling more often than the server actually pulls fresh data from
-// Telegram. User-set Profile.AutoUpdateInterval is honoured if it's >= the
-// 60s floor; otherwise we align with nextFetch + settle delay.
-func (s *Server) runAutoUpdateLoop(ctx context.Context) {
-	select {
-	case <-time.After(autoUpdateStartupDelay):
-	case <-ctx.Done():
-		return
-	}
-
-	var lastTick time.Time
-	for {
-		wait := s.nextAutoUpdateWait(lastTick)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-		if !s.canAutoUpdate() {
-			continue
-		}
-		s.tickAutoUpdate()
-		lastTick = time.Now()
-	}
-}
-
-// nextAutoUpdateWait returns how long to sleep before the next tick. Honours
-// user override when set sensibly; otherwise sleeps until just after the
-// server's next Telegram fetch so we always pull just-refreshed data.
-func (s *Server) nextAutoUpdateWait(lastTick time.Time) time.Duration {
-	pl, _ := s.loadProfiles()
-	if pl != nil && pl.Active != "" {
-		for _, p := range pl.Profiles {
-			if p.ID != pl.Active {
-				continue
-			}
-			if p.AutoUpdateInterval > 0 {
-				user := time.Duration(p.AutoUpdateInterval) * time.Second
-				if user < minAutoUpdateInterval {
-					user = minAutoUpdateInterval
-				}
-				return user
-			}
-			break
-		}
-	}
-
-	s.mu.RLock()
-	nf := s.nextFetch
-	s.mu.RUnlock()
-	if nf == 0 {
-		return minAutoUpdateInterval
-	}
-	target := time.Unix(int64(nf), 0).Add(serverFetchSettleDelay)
-	delay := time.Until(target)
-	if delay < minAutoUpdateInterval {
-		delay = minAutoUpdateInterval
-	}
-	if !lastTick.IsZero() {
-		if since := time.Since(lastTick); since < minAutoUpdateInterval {
-			if rem := minAutoUpdateInterval - since; rem > delay {
-				delay = rem
-			}
-		}
-	}
-	return delay
-}
-
-// canAutoUpdate returns false when we should skip a tick: server hasn't
-// produced metadata yet (channel list empty), or the resolver scanner is
-// busy (it'd race with our DNS fetches), or there's no fetcher.
-func (s *Server) canAutoUpdate() bool {
-	s.mu.RLock()
-	channels := s.channels
-	fetcher := s.fetcher
-	scanner := s.scanner
-	s.mu.RUnlock()
-	if fetcher == nil || len(channels) == 0 {
-		return false
-	}
-	if scanner != nil {
-		switch scanner.State() {
-		case client.ScannerRunning, client.ScannerPaused:
-			return false
-		}
-	}
-	return true
-}
-
-func (s *Server) tickAutoUpdate() {
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil || pl.Active == "" {
-		return
-	}
-	var watch []string
-	for _, p := range pl.Profiles {
-		if p.ID == pl.Active {
-			watch = p.AutoUpdate
-			break
-		}
-	}
-	if len(watch) == 0 {
-		return
-	}
-
-	s.mu.RLock()
-	channels := s.channels
-	s.mu.RUnlock()
-	if len(channels) == 0 {
-		return
-	}
-
-	wantSet := make(map[string]bool, len(watch))
-	for _, name := range watch {
-		wantSet[strings.TrimPrefix(strings.TrimSpace(name), "@")] = true
-	}
-
-	for i, ch := range channels {
-		if !wantSet[ch.Name] {
-			continue
-		}
-		go s.refreshChannel(i + 1) // 1-indexed
-	}
-}
-
-func (s *Server) checkLatestVersion(ctx context.Context) (string, error) {
-	s.mu.RLock()
-	cfg := s.config
-	s.mu.RUnlock()
-	if cfg == nil {
-		return "", fmt.Errorf("no config")
-	}
-
-	// Use resolver bank; fall back to per-profile resolvers.
-	resolvers := cfg.Resolvers
-	var debug bool
-	if pl, plErr := s.loadProfiles(); plErr == nil {
-		debug = pl.Debug
-		if len(pl.ResolverBank) > 0 {
-			resolvers = pl.ResolverBank
-		}
-	}
-
-	fetcher, err := client.NewFetcher(cfg.Domain, cfg.Key, resolvers)
-	if err != nil {
-		return "", fmt.Errorf("create fetcher: %w", err)
-	}
-	if cfg.QueryMode == "double" {
-		fetcher.SetQueryMode(protocol.QueryMultiLabel)
-	}
-	fetcher.SetDebug(debug)
-	s.scanner.SetDebug(debug)
-	if cfg.RateLimit > 0 {
-		fetcher.SetRateLimit(cfg.RateLimit)
-	}
-	if cfg.Scatter > 1 {
-		fetcher.SetScatter(cfg.Scatter)
-	}
-	timeout := 15 * time.Second
-	if cfg.Timeout > 0 {
-		timeout = time.Duration(cfg.Timeout * float64(time.Second))
-	}
-	fetcher.SetTimeout(timeout)
-	fetcher.SetLogFunc(func(msg string) {
-		s.addLog(msg)
-	})
-	fetcher.SetActiveResolvers(resolvers)
-
-	checkCtx, cancel := context.WithTimeout(ctx, timeout*3)
-	defer cancel()
-	fetcher.Start(checkCtx)
-
-	v, err := fetcher.FetchLatestVersion(checkCtx)
-	if err != nil {
-		return "", err
-	}
-
-	s.mu.Lock()
-	s.latestVersion = v
-	s.mu.Unlock()
-	return v, nil
-}
-
-// startCheckerThenRefresh runs the resolver health-check pass synchronously
-// (in a new goroutine), then starts the periodic checker and fetches metadata.
-// This ensures fresh resolver data is used for the very first metadata query.
-func (s *Server) startCheckerThenRefresh() {
-	s.mu.RLock()
-	checker := s.checker
-	ctx := s.fetcherCtx
-	s.mu.RUnlock()
-	if checker == nil {
-		return
-	}
-
-	checker.StartAndNotify(ctx, func() {
-		s.refreshMetadataOnly()
-	})
-}
-
-// skipCheckerUseSaved uses saved resolvers from the last scan and starts
-// periodic health checks without an initial scan pass.
-// If no saved resolvers are available, falls back to a full scan with
-// retry-every-minute until at least one resolver is found.
-func (s *Server) skipCheckerUseSaved() {
-	s.mu.RLock()
-	checker := s.checker
-	ctx := s.fetcherCtx
-	fetcher := s.fetcher
-	s.mu.RUnlock()
-	if checker == nil || fetcher == nil {
-		return
-	}
-	if ls := s.loadLastScan(); ls != nil && len(ls.Resolvers) > 0 {
-		fetcher.SetActiveResolvers(ls.Resolvers)
-		checker.StartPeriodic(ctx)
-		go s.refreshMetadataOnly()
-	} else {
-		// No saved resolvers — do a full scan (with retry-every-minute).
-		checker.StartAndNotify(ctx, func() {
-			s.refreshMetadataOnly()
-		})
-	}
-}
-
-// nextFetchDeadline returns the Time when the server will next fetch from Telegram.
-// Returns zero value if nextFetch is not set or has already passed.
-func (s *Server) nextFetchDeadline() time.Time {
-	s.mu.RLock()
-	nf := s.nextFetch
-	s.mu.RUnlock()
-	if nf == 0 {
-		return time.Time{}
-	}
-	t := time.Unix(int64(nf), 0)
-	if time.Until(t) <= 0 {
-		return time.Time{} // already passed
-	}
-	return t
-}
-
-// waitForServerFetch blocks until the server's Telegram fetch is likely complete
-// (nextFetch + 30 s), emitting a countdown progress event each second so the UI
-// can render a live progress bar. Returns true on completion, false if ctx cancelled.
-func (s *Server) waitForServerFetch(ctx context.Context, nf uint32) bool {
-	const serverFetchDuration = 30 * time.Second
-	deadline := time.Unix(int64(nf), 0).Add(serverFetchDuration)
-	totalWait := time.Until(deadline)
-	if totalWait <= 0 {
-		totalWait = serverFetchDuration
-	}
-	totalSec := int(totalWait.Seconds()) + 1
-
-	s.addLog(fmt.Sprintf("SERVER_FETCH_WAIT start %d", totalSec))
-
-	timer := time.NewTimer(totalWait)
-	defer timer.Stop()
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	start := time.Now()
-	for {
-		select {
-		case <-ctx.Done():
-			s.addLog("SERVER_FETCH_WAIT done")
-			return false
-		case <-timer.C:
-			s.addLog("SERVER_FETCH_WAIT done")
-			return true
-		case <-ticker.C:
-			remaining := int((totalWait - time.Since(start)).Seconds())
-			if remaining < 0 {
-				remaining = 0
-			}
-			s.addLog(fmt.Sprintf("SERVER_FETCH_WAIT tick %d/%d", remaining, totalSec))
-		}
-	}
-}
-
-func (s *Server) refreshMetadataOnly() {
-	// Don't fetch before resolver scanning has found at least one healthy resolver.
-	// The onFirstDone callback in startCheckerThenRefresh is the canonical first trigger.
-	s.mu.RLock()
-	fetcherEarly := s.fetcher
-	s.mu.RUnlock()
-	if fetcherEarly != nil && len(fetcherEarly.Resolvers()) == 0 {
-		s.addLog("Waiting for resolver scan to complete...")
-		return
-	}
-
-	// Cancel any in-progress metadata refresh and start a new cancellable one.
-	const metaKey = 0
-	s.refreshMu.Lock()
-	if prev, ok := s.refreshCancels[metaKey]; ok {
-		prev()
-	}
-
-	s.mu.RLock()
-	basectx := s.fetcherCtx
-	fetcher := s.fetcher
-	cache := s.cache
-	s.mu.RUnlock()
-
-	if fetcher == nil || basectx == nil {
-		delete(s.refreshCancels, metaKey)
-		s.refreshMu.Unlock()
-		return
-	}
-
-	// Child context: cancelled either by the next refresh call or by a config change.
-	ctx, cancel := context.WithCancel(basectx)
-	s.refreshCancels[metaKey] = cancel
-	s.refreshMu.Unlock()
-	defer func() {
-		cancel()
-		s.refreshMu.Lock()
-		delete(s.refreshCancels, metaKey)
-		s.refreshMu.Unlock()
-	}()
-
-	s.addLog(fmt.Sprintf("Fetching metadata... (%d active resolvers)", len(fetcher.Resolvers())))
-
-	// If the server's next Telegram fetch is imminent (within 15 s), wait for it first.
-	if dl := s.nextFetchDeadline(); !dl.IsZero() && time.Until(dl) < 15*time.Second {
-		s.mu.RLock()
-		nf := s.nextFetch
-		s.mu.RUnlock()
-		if !s.waitForServerFetch(ctx, nf) {
-			return
-		}
-	}
-
-	meta, err := fetcher.FetchMetadata(ctx)
-	if err != nil {
-		if ctx.Err() != nil {
-			s.addLog("Refresh cancelled")
-			return
-		}
-		// Detect invalid passphrase from crypto errors
-		errStr := err.Error()
-		if strings.Contains(errStr, "integrity check failed") || strings.Contains(errStr, "message authentication failed") || strings.Contains(errStr, "cipher") {
-			s.addLog("Error: Invalid passphrase — check your encryption key in Settings")
-		} else {
-			s.addLog(fmt.Sprintf("Error: %v", err))
-		}
-		return
-	}
-
-	channels := meta.Channels
-	if cache != nil {
-		if cached := cache.GetAllTitles(); len(cached) > 0 {
-			for i := range channels {
-				if t := cached[channels[i].Name]; t != "" {
-					channels[i].DisplayName = t
-				}
-			}
-		}
-	}
-
-	s.mu.Lock()
-	s.channels = channels
-	s.telegramLoggedIn = meta.TelegramLoggedIn
-	s.nextFetch = meta.NextFetch
-	s.metaFetchedAt = time.Now()
-	s.mu.Unlock()
-
-	if cache != nil {
-		_ = cache.PutMetadata(meta)
-	}
-	s.saveChannelsCache(channels, meta.NextFetch)
-
-	s.broadcast("event: update\ndata: \"channels\"\n\n")
-
-	needsFetch := false
-	for _, ch := range channels {
-		if ch.DisplayName == "" {
-			needsFetch = true
-			break
-		}
-	}
-	if needsFetch {
-		go s.ensureTitlesFetched(basectx)
-	}
-
-	go s.maybeRefreshProfilePics(basectx)
-}
-
-// maybeRefreshProfilePics fires a refresh when GitHub relay is up or
-// the user has opted into the DNS path. No-op otherwise; hub coalesces.
-func (s *Server) maybeRefreshProfilePics(parentCtx context.Context) {
-	s.mu.RLock()
-	hub := s.profilePics
-	fetcher := s.fetcher
-	rc := s.relayInfo
-	s.mu.RUnlock()
-	if hub == nil || fetcher == nil {
-		return
-	}
-	dnsAllowed := s.profilePicsEnabled()
-	githubLikelyUp := false
-	if rc != nil {
-		ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
-		info, err := rc.get(ctx, fetcher)
-		cancel()
-		if err == nil && info.GitHubRepo != "" {
-			githubLikelyUp = true
-		}
-	}
-	if !dnsAllowed && !githubLikelyUp {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	onStored := func(string) {
-		s.broadcast("event: update\ndata: \"profile-pics\"\n\n")
-	}
-	if err := hub.refresh(ctx, fetcher, dnsAllowed, s.fetchFromGitHubRelayBytes, onStored); err == nil {
-		s.broadcast("event: update\ndata: \"profile-pics\"\n\n")
-	}
-}
-
-// ensureTitlesFetched fetches channel display names from TitlesChannel in the background.
-// At most one fetch runs at a time; errors impose a 5-minute backoff so that an
-// outdated server does not cause endless retries.
-func (s *Server) ensureTitlesFetched(ctx context.Context) {
-	s.titlesMu.Lock()
-	if s.titlesLoading || time.Now().Before(s.titlesBackoffUntil) {
-		s.titlesMu.Unlock()
-		return
-	}
-	s.titlesLoading = true
-	s.titlesMu.Unlock()
-
-	defer func() {
-		s.titlesMu.Lock()
-		s.titlesLoading = false
-		s.titlesMu.Unlock()
-	}()
-
-	s.mu.RLock()
-	fetcher := s.fetcher
-	cache := s.cache
-	s.mu.RUnlock()
-
-	if fetcher == nil {
-		return
-	}
-
-	titles, err := fetcher.FetchTitles(ctx)
-	if err != nil && ctx.Err() == nil {
-		s.titlesMu.Lock()
-		s.titlesBackoffUntil = time.Now().Add(5 * time.Minute)
-		s.titlesMu.Unlock()
-		return
-	}
-	if len(titles) == 0 {
-		// Server doesn't support TitlesChannel or has no titles yet; back off.
-		s.titlesMu.Lock()
-		s.titlesBackoffUntil = time.Now().Add(5 * time.Minute)
-		s.titlesMu.Unlock()
-		return
-	}
-
-	if cache != nil {
-		for name, title := range titles {
-			_ = cache.PutTitle(name, title)
-		}
-	}
-
-	s.mu.Lock()
-	channels := s.channels
-	updated := false
-	for i := range channels {
-		if t, ok := titles[channels[i].Name]; ok && t != "" && channels[i].DisplayName != t {
-			channels[i].DisplayName = t
-			updated = true
-		}
-	}
-	s.channels = channels
-	nextFetch := s.nextFetch
-	s.mu.Unlock()
-
-	if updated {
-		s.saveChannelsCache(channels, nextFetch)
-		s.broadcast("event: update\ndata: \"channels\"\n\n")
-	}
-}
-
-func (s *Server) refreshChannel(channelNum int) {
-	// Prevent duplicate fetches for the same channel
-	s.refreshMu.Lock()
-	if _, running := s.refreshCancels[channelNum]; running {
-		s.refreshMu.Unlock()
-		return
-	}
-
-	s.mu.RLock()
-	basectx := s.fetcherCtx
-	fetcher := s.fetcher
-	cache := s.cache
-	s.mu.RUnlock()
-
-	if fetcher == nil || basectx == nil {
-		s.refreshMu.Unlock()
-		return
-	}
-
-	ctx, cancel := context.WithCancel(basectx)
-	s.refreshCancels[channelNum] = cancel
-	s.refreshMu.Unlock()
-	defer func() {
-		cancel()
-		s.refreshMu.Lock()
-		delete(s.refreshCancels, channelNum)
-		s.refreshMu.Unlock()
-	}()
-
-	// Use the cached in-memory metadata if it is fresh enough (< metaCacheTTL, default 30 sec).
-	// This avoids a redundant metadata DNS fetch for every channel refresh.
-	// If the metadata is stale (or was never fetched), fetch it from DNS now.
-	s.mu.RLock()
-	ttl := s.metaCacheTTL
-	if ttl <= 0 {
-		ttl = 30 * time.Second
-	}
-	// Cap TTL at the time remaining until the server's next Telegram fetch.
-	// If nextFetch is sooner than our TTL the cached metadata may already be stale.
-	if nf := s.nextFetch; nf > 0 {
-		if rem := time.Until(time.Unix(int64(nf), 0)); rem > 0 && rem < ttl {
-			ttl = rem
-		}
-	}
-	cachedChannels := s.channels
-	cachedAge := time.Since(s.metaFetchedAt)
-	s.mu.RUnlock()
-
-	var meta *protocol.Metadata
-	if len(cachedChannels) > 0 && cachedAge < ttl {
-		// Build a lightweight Metadata from the cached fields to keep the rest of the
-		// function unchanged.
-		s.mu.RLock()
-		meta = &protocol.Metadata{
-			Channels:         s.channels,
-			TelegramLoggedIn: s.telegramLoggedIn,
-			NextFetch:        s.nextFetch,
-		}
-		s.mu.RUnlock()
-	} else {
-		var err error
-		meta, err = fetcher.FetchMetadata(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				s.addLog("Refresh cancelled")
-				return
-			}
-			errStr := err.Error()
-			if strings.Contains(errStr, "integrity check failed") || strings.Contains(errStr, "message authentication failed") || strings.Contains(errStr, "cipher") {
-				s.addLog("Error: Invalid passphrase — check your encryption key in Settings")
-			} else {
-				s.addLog(fmt.Sprintf("Error: %v", err))
-			}
-			return
-		}
-		channels := meta.Channels
-		if cache != nil {
-			if cached := cache.GetAllTitles(); len(cached) > 0 {
-				for i := range channels {
-					if t := cached[channels[i].Name]; t != "" {
-						channels[i].DisplayName = t
-					}
-				}
-			}
-		}
-		meta.Channels = channels
-		s.mu.Lock()
-		s.channels = channels
-		s.telegramLoggedIn = meta.TelegramLoggedIn
-		s.nextFetch = meta.NextFetch
-		s.metaFetchedAt = time.Now()
-		s.mu.Unlock()
-		if cache != nil {
-			_ = cache.PutMetadata(meta)
-		}
-		s.saveChannelsCache(channels, meta.NextFetch)
-		s.broadcast("event: update\ndata: \"channels\"\n\n")
-		needsFetch := false
-		for _, ch := range channels {
-			if ch.DisplayName == "" {
-				needsFetch = true
-				break
-			}
-		}
-		if needsFetch {
-			go s.ensureTitlesFetched(basectx)
-		}
-	}
-
-	channels := meta.Channels
-	if channelNum < 1 || channelNum > len(channels) {
-		s.addLog(fmt.Sprintf("Warning: channel %d is not available", channelNum))
-		return
-	}
-
-	ch := channels[channelNum-1]
-
-	// Skip refresh if the last message ID and content hash haven't changed
-	// AND we already have messages stored for this channel.
-	s.mu.RLock()
-	prevID := s.lastMsgIDs[channelNum]
-	prevHash := s.lastHashes[channelNum]
-	prevMsgs := s.messages[channelNum]
-	s.mu.RUnlock()
-	if prevID > 0 && ch.LastMsgID == prevID && ch.ContentHash == prevHash && len(prevMsgs) > 0 {
-		s.addLog(fmt.Sprintf("Channel %s: no changes (last ID: %d)", ch.Name, prevID))
-		s.broadcast(fmt.Sprintf("event: update\ndata: {\"type\":\"no_changes\",\"channel\":%d}\n\n", channelNum))
-		return
-	}
-
-	blockCount := int(ch.Blocks)
-	if blockCount <= 0 {
-		s.mu.Lock()
-		s.messages[channelNum] = nil
-		s.lastMsgIDs[channelNum] = ch.LastMsgID
-		s.lastHashes[channelNum] = ch.ContentHash
-		s.mu.Unlock()
-		s.addLog(fmt.Sprintf("Updated %s: 0 messages", ch.Name))
-		s.broadcast(fmt.Sprintf("event: update\ndata: {\"type\":\"messages\",\"channel\":%d}\n\n", channelNum))
-		return
-	}
-
-	// Wrap the context with a deadline at the server's next Telegram fetch.
-	// If the server starts fetching during our block download we cancel early,
-	// wait for the fresh data to land, then restart this channel fetch.
-	fetchCtx := ctx
-	var fetchCancel context.CancelFunc
-	var fetchNF uint32
-	if dl := s.nextFetchDeadline(); !dl.IsZero() {
-		s.mu.RLock()
-		fetchNF = s.nextFetch
-		s.mu.RUnlock()
-
-		// If the server's next refresh is within 15 seconds, wait for it rather
-		// than risking a block-version race (metadata says N blocks but the
-		// server regenerates them mid-download).
-		if time.Until(dl) < 15*time.Second {
-			s.addLog("Server refresh imminent — waiting before fetching blocks")
-			if !s.waitForServerFetch(ctx, fetchNF) {
-				return
-			}
-			// Re-fetch metadata after the server refresh to get fresh block counts.
-			freshMeta, freshErr := fetcher.FetchMetadata(ctx)
-			if freshErr != nil {
-				if ctx.Err() != nil {
-					s.addLog("Refresh cancelled")
-					return
-				}
-				s.addLog(fmt.Sprintf("Channel %s error refreshing metadata: %v", ch.Name, freshErr))
-				return
-			}
-			s.mu.Lock()
-			s.channels = freshMeta.Channels
-			s.telegramLoggedIn = freshMeta.TelegramLoggedIn
-			s.nextFetch = freshMeta.NextFetch
-			s.metaFetchedAt = time.Now()
-			s.mu.Unlock()
-			if cache != nil {
-				_ = cache.PutMetadata(freshMeta)
-			}
-			s.saveChannelsCache(freshMeta.Channels, freshMeta.NextFetch)
-			if channelNum < 1 || channelNum > len(freshMeta.Channels) {
-				return
-			}
-			ch = freshMeta.Channels[channelNum-1]
-			blockCount = int(ch.Blocks)
-			if blockCount <= 0 {
-				return
-			}
-		}
-
-		// Refresh the deadline after potential wait.
-		dl = s.nextFetchDeadline()
-		if !dl.IsZero() {
-			fetchCtx, fetchCancel = context.WithDeadline(ctx, dl)
-			defer fetchCancel()
-		}
-	}
-
-	// Fetch blocks with content-hash verification.  On hash mismatch (the
-	// server regenerated blocks between our metadata fetch and block fetch)
-	// re-fetch metadata and retry up to 2 times.
-	const maxHashRetries = 2
-	var msgs []protocol.Message
-	var err error
-	for attempt := 0; ; attempt++ {
-		msgs, err = fetcher.FetchChannelVerified(fetchCtx, channelNum, blockCount, ch.ContentHash)
-		if err == nil {
-			break
-		}
-		if errors.Is(err, client.ErrContentHashMismatch) && attempt < maxHashRetries {
-			s.addLog(fmt.Sprintf("Channel %s: block-version race detected, re-fetching metadata (attempt %d/%d)", ch.Name, attempt+1, maxHashRetries))
-			freshMeta, freshErr := fetcher.FetchMetadata(ctx)
-			if freshErr != nil {
-				s.addLog(fmt.Sprintf("Channel %s error refreshing metadata: %v", ch.Name, freshErr))
-				return
-			}
-			s.mu.Lock()
-			s.channels = freshMeta.Channels
-			s.telegramLoggedIn = freshMeta.TelegramLoggedIn
-			s.nextFetch = freshMeta.NextFetch
-			s.metaFetchedAt = time.Now()
-			s.mu.Unlock()
-			if cache != nil {
-				_ = cache.PutMetadata(freshMeta)
-			}
-			s.saveChannelsCache(freshMeta.Channels, freshMeta.NextFetch)
-			if channelNum < 1 || channelNum > len(freshMeta.Channels) {
-				return
-			}
-			ch = freshMeta.Channels[channelNum-1]
-			blockCount = int(ch.Blocks)
-			if blockCount <= 0 {
-				return
-			}
-			continue // retry with fresh metadata
-		}
-		if fetchCancel != nil && fetchCtx.Err() == context.DeadlineExceeded {
-			// nextFetch fired mid-download — wait for the server, then re-fetch.
-			fetchCancel()
-			if s.waitForServerFetch(ctx, fetchNF) {
-				go s.refreshChannel(channelNum)
-			}
-			return
-		}
-		if ctx.Err() != nil {
-			s.addLog("Refresh cancelled")
-			return
-		}
-		s.addLog(fmt.Sprintf("Channel %s error: %v", ch.Name, err))
-		return
-	}
-
-	s.mu.Lock()
-	s.messages[channelNum] = msgs
-	// Only store the metadata IDs when we actually received messages.
-	// If the fetch returned 0 messages but the channel has content (LastMsgID > 0),
-	// keep the old IDs so the next refresh will try a full fetch instead of skipping.
-	if len(msgs) > 0 || ch.LastMsgID == 0 {
-		s.lastMsgIDs[channelNum] = ch.LastMsgID
-		s.lastHashes[channelNum] = ch.ContentHash
-	}
-	s.mu.Unlock()
-
-	if cache != nil {
-		if result, mergeErr := cache.MergeAndPut(ch.Name, msgs); mergeErr == nil {
-			// Replace the in-memory store with the full merged history.
-			s.mu.Lock()
-			s.messages[channelNum] = result.Messages
-			s.mu.Unlock()
-		}
-	}
-
-	s.addLog(fmt.Sprintf("Updated %s: %d messages", ch.Name, len(msgs)))
-	s.broadcast(fmt.Sprintf("event: update\ndata: {\"type\":\"messages\",\"channel\":%d}\n\n", channelNum))
-}
-
-func (s *Server) loadConfig() (*Config, error) {
-	path := filepath.Join(s.dataDir, "config.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
-}
-
-// saveLastScan persists the healthy resolver list from the most recent scan.
-func (s *Server) saveLastScan(resolvers []string) {
-	d := lastScanData{Resolvers: resolvers, ScannedAt: time.Now().Unix()}
-	b, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(s.dataDir, "last_scan.json"), b, 0600)
-}
-
-func (s *Server) activeProfileID() string {
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil {
-		return ""
-	}
-	return pl.Active
-}
-
-func (s *Server) channelsCachePath() string {
-	return filepath.Join(s.dataDir, "channels_cache.json")
-}
-
-func (s *Server) readChannelsCacheFile() channelsCacheFile {
-	b, err := os.ReadFile(s.channelsCachePath())
-	if err != nil {
-		return channelsCacheFile{}
-	}
-	var f channelsCacheFile
-	if err := json.Unmarshal(b, &f); err != nil || f == nil {
-		return channelsCacheFile{}
-	}
-	return f
-}
-
-func (s *Server) saveChannelsCache(channels []protocol.ChannelInfo, nextFetch uint32) {
-	id := s.activeProfileID()
-	if id == "" || len(channels) == 0 {
-		return
-	}
-	f := s.readChannelsCacheFile()
-	f[id] = &channelsCacheEntry{
-		Channels:  channels,
-		NextFetch: nextFetch,
-		SavedAt:   time.Now().Unix(),
-	}
-	b, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(s.channelsCachePath(), b, 0600)
-}
-
-func (s *Server) loadChannelsCache() *channelsCacheEntry {
-	id := s.activeProfileID()
-	if id == "" {
-		return nil
-	}
-	return s.readChannelsCacheFile()[id]
-}
-
-func (s *Server) dropChannelsCacheEntry(profileID string) {
-	if profileID == "" {
-		return
-	}
-	f := s.readChannelsCacheFile()
-	if _, ok := f[profileID]; !ok {
-		return
-	}
-	delete(f, profileID)
-	if len(f) == 0 {
-		_ = os.Remove(s.channelsCachePath())
-		return
-	}
-	if b, err := json.MarshalIndent(f, "", "  "); err == nil {
-		_ = os.WriteFile(s.channelsCachePath(), b, 0600)
-	}
-}
-
-// loadLastScan reads the most recent resolver scan result.
-// Returns nil when the file doesn't exist or is older than 24 hours.
-func (s *Server) loadLastScan() *lastScanData {
-	b, err := os.ReadFile(filepath.Join(s.dataDir, "last_scan.json"))
-	if err != nil {
-		return nil
-	}
-	var d lastScanData
-	if err := json.Unmarshal(b, &d); err != nil {
-		return nil
-	}
-	if len(d.Resolvers) == 0 || time.Since(time.Unix(d.ScannedAt, 0)) > 24*time.Hour {
-		return nil
-	}
-	return &d
-}
-
-// handleApplySavedResolvers immediately activates the resolvers from the last
-// scan file, letting the UI skip the current scan and start fetching channels.
-func (s *Server) handleApplySavedResolvers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	ls := s.loadLastScan()
-	if ls == nil {
-		http.Error(w, "no saved scan", 400)
-		return
-	}
-	s.mu.RLock()
-	fetcher := s.fetcher
-	s.mu.RUnlock()
-	if fetcher == nil {
-		http.Error(w, "not configured", 400)
-		return
-	}
-	fetcher.SetActiveResolvers(ls.Resolvers)
-	go s.refreshMetadataOnly()
-	writeJSON(w, map[string]any{"ok": true, "count": len(ls.Resolvers)})
-}
-
-func (s *Server) handleActiveResolvers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	s.mu.RLock()
-	fetcher := s.fetcher
-	s.mu.RUnlock()
-	if fetcher == nil {
-		writeJSON(w, map[string]any{"resolvers": []string{}, "scoreboard": []client.ResolverInfo{}})
-		return
-	}
-	writeJSON(w, map[string]any{
-		"resolvers":  fetcher.Resolvers(),
-		"all":        fetcher.AllResolvers(),
-		"scoreboard": fetcher.ResolverScoreboard(),
-	})
-}
-
-func (s *Server) handleRemoveResolver(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	var req struct {
-		Addr string `json:"addr"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Addr == "" {
-		http.Error(w, "addr required", 400)
-		return
-	}
-	s.mu.RLock()
-	fetcher := s.fetcher
-	s.mu.RUnlock()
-	if fetcher == nil {
-		http.Error(w, "no active fetcher", 400)
-		return
-	}
-	fetcher.RemoveActiveResolver(req.Addr)
-
-	// Persist the removal in the currently-selected named list. Without
-	// this, the resolver pops back on next start because applySelectedList
-	// re-applies the on-disk list verbatim. Scope is intentionally narrow:
-	// only the active list is touched — the bank and other named lists
-	// keep the resolver until the user removes it from the bank.
-	listChanged := false
-	if pl, err := s.loadProfiles(); err == nil && pl != nil {
-		if list := findList(pl, pl.SelectedList); list != nil {
-			out := list.Resolvers[:0]
-			for _, r := range list.Resolvers {
-				if r == req.Addr {
-					listChanged = true
-					continue
-				}
-				out = append(out, r)
-			}
-			if listChanged {
-				list.Resolvers = out
-				_ = s.saveProfiles(pl)
-			}
-		}
-	}
-	if listChanged {
-		// Push tab counts to any open Resolver Bank modal — without
-		// this, the badge stays at the old count until the user
-		// switches lists.
-		s.broadcast("event: update\ndata: \"resolver-lists\"\n\n")
-	}
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-func (s *Server) handleResetResolverStats(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	s.mu.RLock()
-	fetcher := s.fetcher
-	s.mu.RUnlock()
-	if fetcher == nil {
-		http.Error(w, "no active fetcher", 400)
-		return
-	}
-	fetcher.ResetStats()
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-// handleResolverBank manages the shared resolver bank.
-// GET: returns all bank resolvers with scores.
-// POST: adds resolvers to the bank.
-// DELETE: removes specific resolvers from the bank.
-func (s *Server) handleResolverBank(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		pl, _ := s.loadProfiles()
-		if pl == nil {
-			pl = &ProfileList{}
-		}
-
-		// Get live stats from the current fetcher.
-		var liveStats map[string][3]int64
-		var activeSet map[string]bool
-		s.mu.RLock()
-		if s.fetcher != nil {
-			liveStats = s.fetcher.ExportStats()
-			activeSet = make(map[string]bool)
-			for _, r := range s.fetcher.Resolvers() {
-				k := r
-				if !strings.Contains(k, ":") {
-					k += ":53"
-				}
-				activeSet[k] = true
-			}
-		}
-		s.mu.RUnlock()
-		if activeSet == nil {
-			activeSet = make(map[string]bool)
-		}
-
-		type bankResolver struct {
-			Addr    string  `json:"addr"`
-			Score   float64 `json:"score"`
-			Success int64   `json:"success"`
-			Failure int64   `json:"failure"`
-			AvgMs   float64 `json:"avgMs"`
-			Active  bool    `json:"active"`
-		}
-
-		var bank []bankResolver
-		for _, addr := range pl.ResolverBank {
-			key := addr
-			if !strings.Contains(key, ":") {
-				key += ":53"
-			}
-			br := bankResolver{Addr: addr, Active: activeSet[key]}
-			// Prefer live stats, fall back to saved scores.
-			if liveStats != nil {
-				if st, ok := liveStats[key]; ok {
-					br.Success = st[0]
-					br.Failure = st[1]
-					if st[0] > 0 {
-						br.AvgMs = float64(st[2]) / float64(st[0])
-					}
-					br.Score = computeResolverScore(st[0], st[1], st[2])
-				} else if ss, ok := pl.ResolverScores[addr]; ok {
-					br.Success = ss.Success
-					br.Failure = ss.Failure
-					if ss.Success > 0 {
-						br.AvgMs = float64(ss.TotalMs) / float64(ss.Success)
-					}
-					br.Score = computeResolverScore(ss.Success, ss.Failure, ss.TotalMs)
-				} else {
-					br.Score = 0.2
-				}
-			} else if ss, ok := pl.ResolverScores[addr]; ok {
-				br.Success = ss.Success
-				br.Failure = ss.Failure
-				if ss.Success > 0 {
-					br.AvgMs = float64(ss.TotalMs) / float64(ss.Success)
-				}
-				br.Score = computeResolverScore(ss.Success, ss.Failure, ss.TotalMs)
-			} else {
-				br.Score = 0.2
-			}
-			bank = append(bank, br)
-		}
-
-		sort.Slice(bank, func(i, j int) bool { return bank[i].Score > bank[j].Score })
-		writeJSON(w, map[string]any{"bank": bank, "count": len(pl.ResolverBank)})
-
-	case http.MethodPost:
-		var req struct {
-			Resolvers []string `json:"resolvers"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", 400)
-			return
-		}
-		pl, _ := s.loadProfiles()
-		if pl == nil {
-			pl = &ProfileList{}
-		}
-		added := addToBank(pl, req.Resolvers)
-		if err := s.saveProfiles(pl); err != nil {
-			http.Error(w, "save failed", 500)
-			return
-		}
-		// Update the fetcher's resolver pool.
-		s.mu.RLock()
-		f := s.fetcher
-		s.mu.RUnlock()
-		if f != nil {
-			f.UpdateResolverPool(pl.ResolverBank)
-		}
-		writeJSON(w, map[string]any{"ok": true, "added": added, "total": len(pl.ResolverBank)})
-
-	case http.MethodDelete:
-		var req struct {
-			Addrs []string `json:"addrs"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Addrs) == 0 {
-			http.Error(w, "addrs required", 400)
-			return
-		}
-		pl, _ := s.loadProfiles()
-		if pl == nil {
-			writeJSON(w, map[string]any{"ok": true, "removed": 0, "remaining": 0})
-			return
-		}
-		removeSet := make(map[string]bool)
-		for _, a := range req.Addrs {
-			removeSet[a] = true
-		}
-		filtered := make([]string, 0, len(pl.ResolverBank))
-		for _, r := range pl.ResolverBank {
-			if !removeSet[r] {
-				filtered = append(filtered, r)
-			}
-		}
-		removed := len(pl.ResolverBank) - len(filtered)
-		pl.ResolverBank = filtered
-		for _, a := range req.Addrs {
-			delete(pl.ResolverScores, a)
-		}
-		// Strip these resolvers from every saved active list — keeping
-		// a list pointing at a resolver no longer in the bank would
-		// surface as a "ghost" resolver the fetcher would try to use.
-		listsTouched := pruneResolversFromLists(pl, removeSet)
-		_ = s.saveProfiles(pl)
-		s.mu.RLock()
-		f := s.fetcher
-		s.mu.RUnlock()
-		if f != nil {
-			f.UpdateResolverPool(pl.ResolverBank)
-			// If the selected list lost members, reapply it so the
-			// fetcher's active set matches the trimmed list.
-			if listsTouched {
-				if list := findList(pl, pl.SelectedList); list != nil && len(list.Resolvers) > 0 {
-					f.SetActiveResolvers(list.Resolvers)
-				}
-			}
-		}
-		s.broadcast("event: update\ndata: \"resolver-lists\"\n\n")
-		writeJSON(w, map[string]any{"ok": true, "removed": removed, "remaining": len(pl.ResolverBank)})
-
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
-// handleResolverBankCleanup removes resolvers with score below a threshold.
-func (s *Server) handleResolverBankCleanup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	var req struct {
-		MinScore float64 `json:"minScore"`
-		DryRun   bool    `json:"dryRun"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", 400)
-		return
-	}
-	if req.MinScore <= 0 {
-		http.Error(w, "minScore must be > 0", 400)
-		return
-	}
-
-	pl, _ := s.loadProfiles()
-	if pl == nil {
-		writeJSON(w, map[string]any{"ok": true, "removed": 0, "remaining": 0})
-		return
-	}
-
-	// Get live stats for score computation.
-	var liveStats map[string][3]int64
-	s.mu.RLock()
-	if s.fetcher != nil {
-		liveStats = s.fetcher.ExportStats()
-	}
-	s.mu.RUnlock()
-
-	var filtered []string
-	removed := 0
-	for _, addr := range pl.ResolverBank {
-		key := addr
-		if !strings.Contains(key, ":") {
-			key += ":53"
-		}
-		var score float64
-		if liveStats != nil {
-			if st, ok := liveStats[key]; ok {
-				score = computeResolverScore(st[0], st[1], st[2])
-			} else if ss, ok := pl.ResolverScores[addr]; ok {
-				score = computeResolverScore(ss.Success, ss.Failure, ss.TotalMs)
-			} else {
-				score = 0.2
-			}
-		} else if ss, ok := pl.ResolverScores[addr]; ok {
-			score = computeResolverScore(ss.Success, ss.Failure, ss.TotalMs)
-		} else {
-			score = 0.2
-		}
-		if score >= req.MinScore {
-			filtered = append(filtered, addr)
-		} else {
-			removed++
-		}
-	}
-
-	if req.DryRun {
-		writeJSON(w, map[string]any{"ok": true, "removed": removed, "remaining": len(filtered)})
-		return
-	}
-
-	// Apply the cleanup.
-	for _, addr := range pl.ResolverBank {
-		key := addr
-		if !strings.Contains(key, ":") {
-			key += ":53"
-		}
-		var score float64
-		if liveStats != nil {
-			if st, ok := liveStats[key]; ok {
-				score = computeResolverScore(st[0], st[1], st[2])
-			} else if ss, ok := pl.ResolverScores[addr]; ok {
-				score = computeResolverScore(ss.Success, ss.Failure, ss.TotalMs)
-			} else {
-				score = 0.2
-			}
-		} else if ss, ok := pl.ResolverScores[addr]; ok {
-			score = computeResolverScore(ss.Success, ss.Failure, ss.TotalMs)
-		} else {
-			score = 0.2
-		}
-		if score < req.MinScore {
-			delete(pl.ResolverScores, addr)
-		}
-	}
-	// Build the removed-set for list pruning (addresses that didn't
-	// make the score cut).
-	removedSet := make(map[string]bool)
-	keep := make(map[string]bool, len(filtered))
-	for _, k := range filtered {
-		keep[k] = true
-	}
-	for _, addr := range pl.ResolverBank {
-		if !keep[addr] {
-			removedSet[addr] = true
-		}
-	}
-	pl.ResolverBank = filtered
-	listsTouched := pruneResolversFromLists(pl, removedSet)
-	_ = s.saveProfiles(pl)
-	s.mu.RLock()
-	f := s.fetcher
-	s.mu.RUnlock()
-	if f != nil {
-		f.UpdateResolverPool(pl.ResolverBank)
-		if listsTouched {
-			if list := findList(pl, pl.SelectedList); list != nil && len(list.Resolvers) > 0 {
-				f.SetActiveResolvers(list.Resolvers)
-			}
-		}
-	}
-	s.broadcast("event: update\ndata: \"resolver-lists\"\n\n")
-	writeJSON(w, map[string]any{"ok": true, "removed": removed, "remaining": len(filtered)})
-}
-
-func (s *Server) saveConfig(cfg *Config) error {
-	path := filepath.Join(s.dataDir, "config.json")
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0600)
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
-}
-
-func (s *Server) loadProfiles() (*ProfileList, error) {
-	path := filepath.Join(s.dataDir, "profiles.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var pl ProfileList
-	if err := json.Unmarshal(data, &pl); err != nil {
-		return nil, err
-	}
-	return &pl, nil
-}
-
-// loadProfilesExisting returns (nil, nil) only when the file truly
-// doesn't exist; other errors are surfaced so callers don't overwrite
-// with an empty struct.
-func (s *Server) loadProfilesExisting() (*ProfileList, error) {
-	path := filepath.Join(s.dataDir, "profiles.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var pl ProfileList
-	if err := json.Unmarshal(data, &pl); err != nil {
-		return nil, err
-	}
-	return &pl, nil
-}
-
-func (s *Server) saveProfiles(pl *ProfileList) error {
-	if err := os.MkdirAll(s.dataDir, 0700); err != nil {
-		return err
-	}
-	path := filepath.Join(s.dataDir, "profiles.json")
-	data, err := json.MarshalIndent(pl, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-func generateID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// migrateResolverBank merges per-profile resolvers into the shared bank on first run.
-func (s *Server) migrateResolverBank() {
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil {
-		return
-	}
-	if len(pl.ResolverBank) > 0 {
-		return // already migrated
-	}
-	seen := make(map[string]bool)
-	for _, p := range pl.Profiles {
-		for _, r := range p.Config.Resolvers {
-			addr := r
-			if !strings.Contains(addr, ":") {
-				addr += ":53"
-			}
-			if !seen[addr] {
-				seen[addr] = true
-				pl.ResolverBank = append(pl.ResolverBank, addr)
-			}
-		}
-	}
-	if len(pl.ResolverBank) > 0 {
-		for i := range pl.Profiles {
-			pl.Profiles[i].Config.Resolvers = nil
-		}
-		_ = s.saveProfiles(pl)
-	}
-}
-
-// addToBank adds resolvers to the shared bank (deduplicated, normalized with :53).
-func addToBank(pl *ProfileList, resolvers []string) int {
-	seen := make(map[string]bool)
-	for _, r := range pl.ResolverBank {
-		seen[r] = true
-	}
-	added := 0
-	for _, r := range resolvers {
-		addr := r
-		if !strings.Contains(addr, ":") {
-			addr += ":53"
-		}
-		if !seen[addr] {
-			seen[addr] = true
-			pl.ResolverBank = append(pl.ResolverBank, addr)
-			added++
-		}
-	}
-	return added
-}
-
-// persistResolverScores saves the current fetcher stats to profiles.json.
-// Not serialised by profilesMu — initFetcher holds s.mu while calling this,
-// and grabbing profilesMu here would risk AB-BA with handlers that take
-// profilesMu first. The score map-merge is benign under last-writer-wins.
-func (s *Server) persistResolverScores(stats map[string][3]int64) {
-	if len(stats) == 0 {
-		return
-	}
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil {
-		return
-	}
-	if pl.ResolverScores == nil {
-		pl.ResolverScores = make(map[string]*SavedResolverScore)
-	}
-	for addr, st := range stats {
-		pl.ResolverScores[addr] = &SavedResolverScore{
-			Success: st[0],
-			Failure: st[1],
-			TotalMs: st[2],
-		}
-	}
-	_ = s.saveProfiles(pl)
-}
-
-// computeResolverScore mirrors the scoring formula from fetcher.go.
-func computeResolverScore(success, failure, totalMs int64) float64 {
-	total := success + failure
-	if total == 0 {
-		return 0.2
-	}
-	successRate := float64(success) / float64(total)
-	var avgMs float64
-	if success > 0 {
-		avgMs = float64(totalMs) / float64(success)
-	} else {
-		avgMs = 30000
-	}
-	score := successRate * successRate / (avgMs/5000.0 + 1.0)
-	if score < 0.001 {
-		score = 0.001
-	}
-	return score
-}
-
-// handleProfiles manages CRUD for config profiles.
-// GET: returns profile list. POST: create/update/delete profiles.
-func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.profilesMu.Lock()
-		pl, err := s.loadProfilesExisting()
-		if err != nil {
-			s.profilesMu.Unlock()
-			http.Error(w, fmt.Sprintf("load: %v", err), 500)
-			return
-		}
-		if pl == nil {
-			// First-run migration from config.json.
-			pl = &ProfileList{}
-			if s.config != nil {
-				p := Profile{
-					ID:       generateID(),
-					Nickname: s.config.Domain,
-					Config:   *s.config,
-				}
-				pl.Profiles = []Profile{p}
-				pl.Active = p.ID
-				_ = s.saveProfiles(pl)
-			}
-		}
-		s.profilesMu.Unlock()
-		writeJSON(w, pl)
-
-	case http.MethodPost:
-		var req struct {
-			Action    string   `json:"action"` // "create", "update", "delete", "reorder"
-			Profile   Profile  `json:"profile"`
-			Order     []string `json:"order"` // for reorder
-			SkipCheck bool     `json:"skipCheck"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", 400)
-			return
-		}
-		s.profilesMu.Lock()
-		pl, err := s.loadProfilesExisting()
-		if err != nil {
-			s.profilesMu.Unlock()
-			http.Error(w, fmt.Sprintf("load: %v", err), 500)
-			return
-		}
-		if pl == nil {
-			pl = &ProfileList{}
-		}
-
-		needsReinit := false
-
-		switch req.Action {
-		case "create":
-			req.Profile.ID = generateID()
-			if req.Profile.Nickname == "" {
-				req.Profile.Nickname = req.Profile.Config.Domain
-			}
-			// Move resolvers to the shared bank.
-			if len(req.Profile.Config.Resolvers) > 0 {
-				addToBank(pl, req.Profile.Config.Resolvers)
-				req.Profile.Config.Resolvers = nil
-			}
-			pl.Profiles = append(pl.Profiles, req.Profile)
-			if len(pl.Profiles) == 1 {
-				pl.Active = req.Profile.ID
-				needsReinit = true
-			}
-
-		case "update":
-			for i, p := range pl.Profiles {
-				if p.ID == req.Profile.ID {
-					// Move resolvers to the shared bank.
-					if len(req.Profile.Config.Resolvers) > 0 {
-						addToBank(pl, req.Profile.Config.Resolvers)
-						req.Profile.Config.Resolvers = nil
-					}
-					// Carry over fields the edit-profile UI doesn't manage so
-					// they don't get wiped on save (auto-update list etc.).
-					req.Profile.AutoUpdate = p.AutoUpdate
-					req.Profile.AutoUpdateInterval = p.AutoUpdateInterval
-					pl.Profiles[i] = req.Profile
-					if p.ID == pl.Active {
-						needsReinit = true
-					}
-					break
-				}
-			}
-
-		case "delete":
-			for i, p := range pl.Profiles {
-				if p.ID == req.Profile.ID {
-					pl.Profiles = append(pl.Profiles[:i], pl.Profiles[i+1:]...)
-					if pl.Active == req.Profile.ID {
-						pl.Active = ""
-						if len(pl.Profiles) > 0 {
-							pl.Active = pl.Profiles[0].ID
-							needsReinit = true
-						}
-					}
-					s.dropChannelsCacheEntry(req.Profile.ID)
-					break
-				}
-			}
-
-		case "reorder":
-			if len(req.Order) > 0 {
-				ordered := make([]Profile, 0, len(pl.Profiles))
-				byID := make(map[string]Profile)
-				for _, p := range pl.Profiles {
-					byID[p.ID] = p
-				}
-				for _, id := range req.Order {
-					if p, ok := byID[id]; ok {
-						ordered = append(ordered, p)
-					}
-				}
-				pl.Profiles = ordered
-			}
-
-		default:
-			s.profilesMu.Unlock()
-			http.Error(w, "unknown action", 400)
-			return
-		}
-
-		saveErr := s.saveProfiles(pl)
-		var activeConfig *Config
-		if needsReinit && pl.Active != "" {
-			for _, p := range pl.Profiles {
-				if p.ID == pl.Active {
-					cfg := p.Config
-					activeConfig = &cfg
-					break
-				}
-			}
-		}
-		s.profilesMu.Unlock()
-
-		if saveErr != nil {
-			http.Error(w, fmt.Sprintf("save profiles: %v", saveErr), 500)
-			return
-		}
-
-		// initFetcher takes s.mu — call it OUTSIDE profilesMu so handlers
-		// that need both don't AB-BA against it.
-		if activeConfig != nil {
-			_ = s.saveConfig(activeConfig)
-			s.mu.Lock()
-			s.config = activeConfig
-			s.mu.Unlock()
-			if err := s.initFetcher(); err != nil {
-				log.Printf("[web] re-init fetcher after profile change: %v", err)
-			} else if req.SkipCheck {
-				s.skipCheckerUseSaved()
-			} else {
-				s.startCheckerThenRefresh()
-			}
-		}
-
-		s.broadcast("event: update\ndata: \"profiles\"\n\n")
-		writeJSON(w, map[string]any{"ok": true, "profiles": pl})
-
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
-// handleProfileSwitch switches the active profile and re-initializes the fetcher.
-func (s *Server) handleProfileSwitch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	var req struct {
-		ID        string `json:"id"`
-		SkipCheck bool   `json:"skipCheck"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", 400)
-		return
-	}
-	s.profilesMu.Lock()
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil {
-		s.profilesMu.Unlock()
-		http.Error(w, "no profiles", 400)
-		return
-	}
-	var found *Profile
-	for i, p := range pl.Profiles {
-		if p.ID == req.ID {
-			found = &pl.Profiles[i]
-			break
-		}
-	}
-	if found == nil {
-		s.profilesMu.Unlock()
-		http.Error(w, "profile not found", 404)
-		return
-	}
-	pl.Active = found.ID
-	saveErr := s.saveProfiles(pl)
-	s.profilesMu.Unlock()
-	if err := saveErr; err != nil {
-		http.Error(w, fmt.Sprintf("save: %v", err), 500)
-		return
-	}
-	if err := s.saveConfig(&found.Config); err != nil {
-		http.Error(w, fmt.Sprintf("save config: %v", err), 500)
-		return
-	}
-
-	// Reset state and seed channels from the new profile's cache (if any).
-	cc := s.loadChannelsCache()
-	s.mu.Lock()
-	s.config = &found.Config
-	if cc != nil {
-		s.channels = cc.Channels
-		s.nextFetch = cc.NextFetch
-	} else {
-		s.channels = nil
-	}
-	s.messages = make(map[int][]protocol.Message)
-	if s.relayInfo != nil {
-		s.relayInfo.invalidate()
-	}
-	s.lastMsgIDs = make(map[int]uint32)
-	s.lastHashes = make(map[int]uint32)
-	s.mu.Unlock()
-	// Tell every connected client (other tabs / devices) that the active
-	// profile changed so they refresh their UI instead of pointing at the
-	// old one.
-	s.broadcast("event: update\ndata: \"profiles\"\n\n")
-	if cc != nil {
-		s.broadcast("event: update\ndata: \"channels\"\n\n")
-	}
-
-	if err := s.initFetcher(); err != nil {
-		http.Error(w, fmt.Sprintf("init fetcher: %v", err), 500)
-		return
-	}
-	// Same fallback chain as boot: selected list → last_scan → full scan.
-	if req.SkipCheck && s.applySelectedList() {
-		s.mu.RLock()
-		checker := s.checker
-		ctx := s.fetcherCtx
-		s.mu.RUnlock()
-		if checker != nil && ctx != nil {
-			checker.StartPeriodic(ctx)
-		}
-		go s.refreshMetadataOnly()
-	} else if req.SkipCheck {
-		s.skipCheckerUseSaved()
-	} else {
-		s.startCheckerThenRefresh()
-	}
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-// handleAutoUpdate exposes the active profile's auto-update channel list.
-// GET → {channels, intervalSeconds, defaultIntervalSeconds}.
-// POST {channels, intervalSeconds?} replaces both. Names are stripped and
-// dedup'd before saving.
-func (s *Server) handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		pl, _ := s.loadProfiles()
-		channels := []string{}
-		interval := 0
-		if pl != nil && pl.Active != "" {
-			for _, p := range pl.Profiles {
-				if p.ID == pl.Active {
-					if p.AutoUpdate != nil {
-						channels = p.AutoUpdate
-					}
-					interval = p.AutoUpdateInterval
-					break
-				}
-			}
-		}
-		writeJSON(w, map[string]any{
-			"channels":               channels,
-			"intervalSeconds":        interval,
-			"defaultIntervalSeconds": int(minAutoUpdateInterval / time.Second),
-		})
-
-	case http.MethodPost:
-		var req struct {
-			Channels        []string `json:"channels"`
-			IntervalSeconds *int     `json:"intervalSeconds,omitempty"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", 400)
-			return
-		}
-		pl, err := s.loadProfiles()
-		if err != nil || pl == nil || pl.Active == "" {
-			http.Error(w, "no active profile", 400)
-			return
-		}
-		idx := -1
-		for i, p := range pl.Profiles {
-			if p.ID == pl.Active {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			http.Error(w, "active profile not found", 400)
-			return
-		}
-		pl.Profiles[idx].AutoUpdate = normaliseAutoUpdateList(req.Channels)
-		if req.IntervalSeconds != nil {
-			v := *req.IntervalSeconds
-			if v < 0 {
-				v = 0
-			}
-			minSec := int(minAutoUpdateInterval / time.Second)
-			if v > 0 && v < minSec {
-				v = minSec // floor: never poll faster than the server fetches
-			}
-			pl.Profiles[idx].AutoUpdateInterval = v
-		}
-		if err := s.saveProfiles(pl); err != nil {
-			http.Error(w, fmt.Sprintf("save: %v", err), 500)
-			return
-		}
-		writeJSON(w, map[string]any{
-			"ok":              true,
-			"channels":        pl.Profiles[idx].AutoUpdate,
-			"intervalSeconds": pl.Profiles[idx].AutoUpdateInterval,
-		})
-
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
-// handleAutoUpdateToggle flips one channel's membership. Body {channel}.
-// Returns {enabled, channels}.
-func (s *Server) handleAutoUpdateToggle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	var req struct {
-		Channel string `json:"channel"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", 400)
-		return
-	}
-	name := strings.TrimPrefix(strings.TrimSpace(req.Channel), "@")
-	if name == "" {
-		http.Error(w, "channel required", 400)
-		return
-	}
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil || pl.Active == "" {
-		http.Error(w, "no active profile", 400)
-		return
-	}
-	idx := -1
-	for i, p := range pl.Profiles {
-		if p.ID == pl.Active {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		http.Error(w, "active profile not found", 400)
-		return
-	}
-	current := pl.Profiles[idx].AutoUpdate
-	on := false
-	hit := -1
-	for i, n := range current {
-		if strings.TrimPrefix(strings.TrimSpace(n), "@") == name {
-			hit = i
-			break
-		}
-	}
-	if hit >= 0 {
-		current = append(current[:hit], current[hit+1:]...)
-	} else {
-		current = append(current, name)
-		on = true
-	}
-	pl.Profiles[idx].AutoUpdate = normaliseAutoUpdateList(current)
-	if err := s.saveProfiles(pl); err != nil {
-		http.Error(w, fmt.Sprintf("save: %v", err), 500)
-		return
-	}
-	writeJSON(w, map[string]any{
-		"ok":       true,
-		"channel":  name,
-		"enabled":  on,
-		"channels": pl.Profiles[idx].AutoUpdate,
-	})
-}
-
-// normaliseAutoUpdateList strips @ + whitespace, drops empties, dedupes
-// while preserving order.
-func normaliseAutoUpdateList(in []string) []string {
-	seen := make(map[string]bool, len(in))
-	out := make([]string, 0, len(in))
-	for _, raw := range in {
-		name := strings.TrimPrefix(strings.TrimSpace(raw), "@")
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	return out
-}
-
-// handleSettings manages user preferences (font size etc.).
-func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		pl, _ := s.loadProfiles()
-		if pl == nil {
-			pl = &ProfileList{}
-		}
-		writeJSON(w, map[string]any{
-			"fontSize":           pl.FontSize,
-			"debug":              pl.Debug,
-			"theme":              pl.Theme,
-			"lang":               pl.Lang,
-			"scanPromptOff":      pl.ScanPromptOff,
-			"profilePicsEnabled": pl.ProfilePicsEnabled,
-			"version":            version.Version,
-			"commit":             version.Commit,
-		})
-
-	case http.MethodPost:
-		// Optional pointers so partial requests don't reset other fields.
-		var req struct {
-			FontSize           *int    `json:"fontSize"`
-			Debug              *bool   `json:"debug"`
-			Theme              *string `json:"theme"`
-			Lang               *string `json:"lang"`
-			ScanPromptOff      *bool   `json:"scanPromptOff"`
-			ProfilePicsEnabled *bool   `json:"profilePicsEnabled"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", 400)
-			return
-		}
-		s.profilesMu.Lock()
-		defer s.profilesMu.Unlock()
-		pl, err := s.loadProfilesExisting()
-		if err != nil {
-			http.Error(w, fmt.Sprintf("load: %v", err), 500)
-			return
-		}
-		if pl == nil {
-			pl = &ProfileList{}
-		}
-		if req.FontSize != nil {
-			fs := *req.FontSize
-			if fs < 10 {
-				fs = 0
-			}
-			if fs > 24 {
-				fs = 24
-			}
-			pl.FontSize = fs
-		}
-		if req.Debug != nil {
-			pl.Debug = *req.Debug
-		}
-		if req.Theme != nil && (*req.Theme == "dark" || *req.Theme == "light") {
-			pl.Theme = *req.Theme
-		}
-		if req.Lang != nil && (*req.Lang == "fa" || *req.Lang == "en") {
-			pl.Lang = *req.Lang
-		}
-		if req.ScanPromptOff != nil {
-			pl.ScanPromptOff = *req.ScanPromptOff
-		}
-		if req.ProfilePicsEnabled != nil {
-			pl.ProfilePicsEnabled = *req.ProfilePicsEnabled
-		}
-		if err := s.saveProfiles(pl); err != nil {
-			http.Error(w, fmt.Sprintf("save: %v", err), 500)
-			return
-		}
-		// Apply debug to the current fetcher session immediately.
-		if req.Debug != nil {
-			s.mu.RLock()
-			f := s.fetcher
-			s.mu.RUnlock()
-			if f != nil {
-				f.SetDebug(*req.Debug)
-			}
-			s.scanner.SetDebug(*req.Debug)
-		}
-		writeJSON(w, map[string]any{"ok": true})
-
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
-func (s *Server) handleBgImage(w http.ResponseWriter, r *http.Request) {
-	bgPath := filepath.Join(s.dataDir, "bg_image")
-	switch r.Method {
-	case http.MethodGet:
-		data, err := os.ReadFile(bgPath)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.WriteHeader(204)
-			return
-		}
-		// Detect content type from file data.
-		ct := http.DetectContentType(data)
-		w.Header().Set("Content-Type", ct)
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Write(data)
-
-	case http.MethodPost:
-		// Limit upload to 10 MB.
-		r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
-		data, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "file too large (max 10MB)", 413)
-			return
-		}
-		ct := http.DetectContentType(data)
-		if !strings.HasPrefix(ct, "image/") {
-			http.Error(w, "not an image", 400)
-			return
-		}
-		if err := os.WriteFile(bgPath, data, 0600); err != nil {
-			http.Error(w, fmt.Sprintf("save: %v", err), 500)
-			return
-		}
-		writeJSON(w, map[string]any{"ok": true})
-
-	case http.MethodDelete:
-		os.Remove(bgPath)
-		writeJSON(w, map[string]any{"ok": true})
-
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
-func (s *Server) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-
-	v, err := s.checkLatestVersion(r.Context())
-	if err != nil {
-		if strings.Contains(err.Error(), "no config") {
-			http.Error(w, "no config", 400)
-			return
-		}
-		errStr := err.Error()
-		if strings.Contains(errStr, "integrity check failed") || strings.Contains(errStr, "message authentication failed") || strings.Contains(errStr, "cipher") {
-			http.Error(w, "invalid passphrase", 400)
-			return
-		}
-		http.Error(w, fmt.Sprintf("version check failed: %v", err), 502)
-		return
-	}
-
-	writeJSON(w, map[string]any{"ok": true, "latestVersion": v})
-}
-
-// handleGitHubUpdateCheck queries the public thefeed-files repo for the
-// latest published client version and returns a download URL tailored
-// to this binary's platform. Independent of the DNS-protocol version
-// check above — works without a configured profile.
-func (s *Server) handleGitHubUpdateCheck(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
-	defer cancel()
-	st, err := update.Check(ctx)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("update check failed: %v", err), 502)
-		return
-	}
-	writeJSON(w, st)
-}
-
-// =====================================================================
-// Named active resolver lists
-//
-// Users keep one ResolverBank (the master pool) but many named subsets
-// of it — typically one per network situation (home, office, mobile).
-// Switching the selected list hot-swaps the fetcher's active resolvers
-// without rescanning. When a resolver is removed from the bank it's
-// removed from every list too, so a list never references a resolver
-// that no longer exists in the master pool.
-// =====================================================================
-
-const defaultListName = "Default"
-
-// persistScanResultsToList commits checker healthy results to the
-// selected list when (a) the list is empty (bank-scan fallback) or
-// (b) handleRescan asked for an overwrite. Re-pins the runtime pool
-// and broadcasts so the open modal repopulates.
-func (s *Server) persistScanResultsToList(healthy []string) {
-	if len(healthy) == 0 {
-		return
-	}
-	s.rescanFlagMu.Lock()
-	overwrite := s.rescanReplaceList
-	s.rescanReplaceList = false
-	s.rescanFlagMu.Unlock()
-
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil {
-		return
-	}
-	list := findList(pl, pl.SelectedList)
-	if list == nil {
-		// First scan with no lists yet — seed a Default list so the
-		// UI doesn't show empty after the very first scan completes.
-		pl.ActiveLists = append(pl.ActiveLists, ActiveList{Name: defaultListName})
-		list = &pl.ActiveLists[len(pl.ActiveLists)-1]
-		pl.SelectedList = defaultListName
-	}
-	// Don't shrink a populated list on routine periodic checks.
-	if !overwrite && len(list.Resolvers) > 0 {
-		return
-	}
-	list.Resolvers = append([]string(nil), healthy...)
-	list.LastUsed = time.Now().Unix()
-	if err := s.saveProfiles(pl); err != nil {
-		s.addLog(fmt.Sprintf("save profiles after scan: %v", err))
-		return
-	}
-	s.mu.RLock()
-	f := s.fetcher
-	s.mu.RUnlock()
-	if f != nil {
-		f.UpdateResolverPool(list.Resolvers)
-	}
-	s.addLog(fmt.Sprintf("resolvers: list %q populated with %d healthy resolvers", list.Name, len(healthy)))
-	s.broadcast("event: update\ndata: \"resolver-lists\"\n\n")
-}
-
-// persistLastScanToProfiles seeds an empty selected list and/or empty
-// bank from boot-time last_scan.json so the UI counts match the
-// runtime fetcher's active set.
-func (s *Server) persistLastScanToProfiles(resolvers []string) {
-	if len(resolvers) == 0 {
-		return
-	}
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil {
-		return
-	}
-	changed := false
-	if list := findList(pl, pl.SelectedList); list != nil && len(list.Resolvers) == 0 {
-		list.Resolvers = append([]string(nil), resolvers...)
-		list.LastUsed = time.Now().Unix()
-		changed = true
-	}
-	if len(pl.ResolverBank) == 0 {
-		pl.ResolverBank = append([]string(nil), resolvers...)
-		changed = true
-	}
-	if !changed {
-		return
-	}
-	if err := s.saveProfiles(pl); err != nil {
-		s.addLog(fmt.Sprintf("save profiles after last_scan boot: %v", err))
-	}
-}
-
-// applySelectedList is the boot-time short-circuit. Returns true when
-// a populated saved list was applied; false routes the caller to the
-// last_scan.json / full-scan fallback chain.
-func (s *Server) applySelectedList() bool {
-	pl, err := s.loadProfiles()
-	if err != nil || pl == nil {
-		return false
-	}
-	migrated := s.migrateActiveLists(pl)
-	if list := findList(pl, pl.SelectedList); list != nil && len(list.Resolvers) > 0 {
-		s.mu.RLock()
-		f := s.fetcher
-		s.mu.RUnlock()
-		if f != nil {
-			f.UpdateResolverPool(list.Resolvers)
-			f.SetActiveResolvers(list.Resolvers)
-			list.LastUsed = time.Now().Unix()
-			if err := s.saveProfiles(pl); err != nil {
-				s.addLog(fmt.Sprintf("save profiles after select: %v", err))
-			}
-			s.addLog(fmt.Sprintf("resolvers: applied list %q (%d resolvers)", list.Name, len(list.Resolvers)))
-			return true
-		}
-	}
-	if migrated {
-		_ = s.saveProfiles(pl)
-	}
-	return false
-}
-
-// migrateActiveLists fills in ActiveLists for installs that pre-date
-// this feature. The current last_scan.json (or, failing that, the
-// resolver bank) becomes a single list named "Default" so users keep
-// their current setup. Returns true if a write is needed.
-func (s *Server) migrateActiveLists(pl *ProfileList) bool {
-	if pl == nil || len(pl.ActiveLists) > 0 {
-		// Even if lists exist, make sure SelectedList points at one.
-		if findList(pl, pl.SelectedList) == nil && len(pl.ActiveLists) > 0 {
-			pl.SelectedList = pl.ActiveLists[0].Name
-			return true
-		}
-		return false
-	}
-	var seed []string
-	if ls := s.loadLastScan(); ls != nil && len(ls.Resolvers) > 0 {
-		seed = ls.Resolvers
-	} else if len(pl.ResolverBank) > 0 {
-		seed = pl.ResolverBank
-	}
-	if len(seed) == 0 {
-		return false
-	}
-	pl.ActiveLists = []ActiveList{{
-		Name:      defaultListName,
-		Resolvers: append([]string(nil), seed...),
-		LastUsed:  time.Now().Unix(),
-	}}
-	pl.SelectedList = defaultListName
-	return true
-}
-
-// findList returns a pointer into pl.ActiveLists so callers can mutate
-// the entry directly. Match is case-insensitive on the trimmed name.
-func findList(pl *ProfileList, name string) *ActiveList {
-	if pl == nil || name == "" {
-		return nil
-	}
-	for i := range pl.ActiveLists {
-		if strings.EqualFold(strings.TrimSpace(pl.ActiveLists[i].Name), strings.TrimSpace(name)) {
-			return &pl.ActiveLists[i]
-		}
+	// Rebuild the chat hub's per-server clients from the current profiles; its
+	// poll loop also dies with fetcherCtx.
+	if s.chat != nil {
+		s.chat.reset(ctx)
 	}
 	return nil
 }
 
-// pruneResolverFromLists removes resolver from every named list. Called
-// after the user removes a resolver from the bank so dangling
-// references don't outlive their entry. Returns true if any list was
-// modified.
-func pruneResolverFromLists(pl *ProfileList, resolver string) bool {
-	if pl == nil || resolver == "" {
-		return false
-	}
-	changed := false
-	for i := range pl.ActiveLists {
-		out := pl.ActiveLists[i].Resolvers[:0]
-		for _, r := range pl.ActiveLists[i].Resolvers {
-			if r == resolver {
-				changed = true
-				continue
-			}
-			out = append(out, r)
-		}
-		pl.ActiveLists[i].Resolvers = out
-	}
-	return changed
-}
-
-// pruneResolversFromLists removes a set of resolvers from every list in
-// one pass — used by the bank cleanup path that drops many at once.
-func pruneResolversFromLists(pl *ProfileList, removed map[string]bool) bool {
-	if pl == nil || len(removed) == 0 {
-		return false
-	}
-	changed := false
-	for i := range pl.ActiveLists {
-		out := pl.ActiveLists[i].Resolvers[:0]
-		for _, r := range pl.ActiveLists[i].Resolvers {
-			if removed[r] {
-				changed = true
-				continue
-			}
-			out = append(out, r)
-		}
-		pl.ActiveLists[i].Resolvers = out
-	}
-	return changed
-}
-
-// sanitizeListName normalises and length-caps user-supplied names.
-// Returns "" if the cleaned name is empty.
-func sanitizeListName(raw string) string {
-	name := strings.TrimSpace(raw)
-	if name == "" {
-		return ""
-	}
-	if len(name) > 32 {
-		name = name[:32]
-	}
-	return name
-}
-
-type resolverListOut struct {
-	Name      string   `json:"name"`
-	Count     int      `json:"count"`
-	Resolvers []string `json:"resolvers,omitempty"`
-	LastUsed  int64    `json:"lastUsed,omitempty"`
-	Selected  bool     `json:"selected,omitempty"`
-}
-
-// handleResolverLists supports GET (enumerate), POST (create), DELETE
-// (remove). Body for POST: {name, resolvers?}; if resolvers omitted,
-// snapshot the currently-active resolvers under the new name.
-//
-// GET ?include=resolvers also serialises each list's full resolver
-// address list — used by the share panel's "source = list X" picker.
-func (s *Server) handleResolverLists(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.writeListsInfo(w, r.URL.Query().Get("include") == "resolvers")
-	case http.MethodPost:
-		var body struct {
-			Name      string   `json:"name"`
-			Resolvers []string `json:"resolvers,omitempty"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&body); err != nil {
-			http.Error(w, "bad json", 400)
-			return
-		}
-		name := sanitizeListName(body.Name)
-		if name == "" {
-			http.Error(w, "name required", 400)
-			return
-		}
-		pl, err := s.loadProfiles()
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		s.migrateActiveLists(pl)
-		if findList(pl, name) != nil {
-			http.Error(w, "list already exists", 409)
-			return
-		}
-		resolvers := body.Resolvers
-		if len(resolvers) == 0 {
-			// Default: copy the currently-active resolvers so the user
-			// can label whatever's working right now.
-			s.mu.RLock()
-			f := s.fetcher
-			s.mu.RUnlock()
-			if f != nil {
-				resolvers = append([]string(nil), f.Resolvers()...)
-			}
-		}
-		pl.ActiveLists = append(pl.ActiveLists, ActiveList{
-			Name:      name,
-			Resolvers: append([]string(nil), resolvers...),
-			LastUsed:  time.Now().Unix(),
-		})
-		if err := s.saveProfiles(pl); err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		s.writeListsInfo(w)
-	case http.MethodDelete:
-		var body struct {
-			Name string `json:"name"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil {
-			http.Error(w, "bad json", 400)
-			return
-		}
-		name := sanitizeListName(body.Name)
-		if name == "" {
-			http.Error(w, "name required", 400)
-			return
-		}
-		pl, err := s.loadProfiles()
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		idx := -1
-		for i := range pl.ActiveLists {
-			if strings.EqualFold(strings.TrimSpace(pl.ActiveLists[i].Name), name) {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			http.Error(w, "no such list", 404)
-			return
-		}
-		if len(pl.ActiveLists) == 1 {
-			http.Error(w, "cannot delete the only list", 400)
-			return
-		}
-		removed := pl.ActiveLists[idx].Name
-		pl.ActiveLists = append(pl.ActiveLists[:idx], pl.ActiveLists[idx+1:]...)
-		// If the deleted list was selected, pick the most recently used
-		// remaining list as the new selection and reapply.
-		if strings.EqualFold(strings.TrimSpace(pl.SelectedList), removed) {
-			best := 0
-			for i := 1; i < len(pl.ActiveLists); i++ {
-				if pl.ActiveLists[i].LastUsed > pl.ActiveLists[best].LastUsed {
-					best = i
-				}
-			}
-			pl.SelectedList = pl.ActiveLists[best].Name
-			s.mu.RLock()
-			f := s.fetcher
-			s.mu.RUnlock()
-			if f != nil {
-				// Match handleResolverListSelect — pin both the pool
-				// and active to the new list so the checker doesn't
-				// re-broaden after the swap.
-				f.UpdateResolverPool(pl.ActiveLists[best].Resolvers)
-				f.SetActiveResolvers(pl.ActiveLists[best].Resolvers)
-			}
-		}
-		if err := s.saveProfiles(pl); err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		s.writeListsInfo(w)
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
-// handleResolverListSelect switches the active list and hot-swaps the
-// fetcher's resolver pool. No probing — the user is choosing a list
-// they already trust to work in this situation. NoScan disables the
-// empty-list bank-scan fallback so the user can deliberately switch
-// to an empty list without kicking off a probe.
-func (s *Server) handleResolverListSelect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	var body struct {
-		Name   string `json:"name"`
-		NoScan bool   `json:"noScan"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil {
-		http.Error(w, "bad json", 400)
-		return
-	}
-	name := sanitizeListName(body.Name)
-	if name == "" {
-		http.Error(w, "name required", 400)
-		return
-	}
-	pl, err := s.loadProfiles()
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	list := findList(pl, name)
-	if list == nil {
-		http.Error(w, "no such list", 404)
-		return
-	}
-	pl.SelectedList = list.Name
-	list.LastUsed = time.Now().Unix()
-	if err := s.saveProfiles(pl); err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
+// chatResolvers returns a resolver list for building chat fetchers: the active
+// fetcher's healthy resolvers, falling back to the shared bank.
+func (s *Server) chatResolvers() []string {
 	s.mu.RLock()
 	f := s.fetcher
-	checker := s.checker
 	s.mu.RUnlock()
-	// Cancel any in-progress bank scan first — the user is asking for
-	// a different pool, so probing the previous one is wasted work.
-	if checker != nil {
-		checker.CancelCurrentScan()
-	}
 	if f != nil {
-		switch {
-		case len(list.Resolvers) > 0:
-			f.UpdateResolverPool(list.Resolvers)
-			f.SetActiveResolvers(list.Resolvers)
-			s.addLog(fmt.Sprintf("resolvers: switched to list %q (%d resolvers)", list.Name, len(list.Resolvers)))
-			go s.refreshMetadataOnly()
-		case !body.NoScan && len(pl.ResolverBank) > 0:
-			// Empty list, scan opted in: probe the bank as fallback.
-			// CheckNow rather than StartAndNotify because the latter
-			// has a one-shot guard that's already tripped post-boot.
-			f.UpdateResolverPool(pl.ResolverBank)
-			f.SetActiveResolvers(nil)
-			s.addLog(fmt.Sprintf("resolvers: list %q is empty — scanning bank (%d) as fallback", list.Name, len(pl.ResolverBank)))
-			s.mu.RLock()
-			ctx := s.fetcherCtx
-			s.mu.RUnlock()
-			if checker != nil && ctx != nil {
-				go func() {
-					if checker.CheckNow(ctx) {
-						s.refreshMetadataOnly()
-					}
-				}()
-			}
-		case body.NoScan:
-			f.UpdateResolverPool(nil)
-			f.SetActiveResolvers(nil)
-			s.addLog(fmt.Sprintf("resolvers: switched to empty list %q (scan declined)", list.Name))
-		default:
-			f.UpdateResolverPool(nil)
-			f.SetActiveResolvers(nil)
-			s.addLog(fmt.Sprintf("resolvers: list %q is empty and bank is empty — run scanner first", list.Name))
+		if rs := f.Resolvers(); len(rs) > 0 {
+			return rs
 		}
 	}
-	s.writeListsInfo(w)
+	if pl, err := s.loadProfiles(); err == nil && len(pl.ResolverBank) > 0 {
+		return pl.ResolverBank
+	}
+	return nil
 }
 
-// handleResolverListSave snapshots the currently-active fetcher
-// resolvers into a list. Mode "create" fails if the name already
-// exists; mode "overwrite" replaces an existing list's resolvers.
-func (s *Server) handleResolverListSave(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	var body struct {
-		Name string `json:"name"`
-		Mode string `json:"mode"` // "create" (default) or "overwrite"
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil {
-		http.Error(w, "bad json", 400)
-		return
-	}
-	name := sanitizeListName(body.Name)
-	if name == "" {
-		http.Error(w, "name required", 400)
-		return
-	}
-	s.mu.RLock()
-	f := s.fetcher
-	s.mu.RUnlock()
-	if f == nil {
-		http.Error(w, "not configured", 400)
-		return
-	}
-	resolvers := append([]string(nil), f.Resolvers()...)
-	if len(resolvers) == 0 {
-		http.Error(w, "no active resolvers to save", 400)
-		return
-	}
-	pl, err := s.loadProfiles()
+// buildChatFetcher creates a lightweight Fetcher for a profile's server, used
+// only for chat (no health scanner — it reuses the shared resolver list). Its
+// background goroutines die with ctx.
+func (s *Server) buildChatFetcher(cfg Config, resolvers []string, ctx context.Context) (*client.Fetcher, error) {
+	f, err := client.NewFetcher(cfg.Domain, cfg.Key, resolvers)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
+		return nil, err
 	}
-	s.migrateActiveLists(pl)
-	existing := findList(pl, name)
-	if existing != nil {
-		if body.Mode != "overwrite" {
-			http.Error(w, "list already exists", 409)
-			return
+	if len(cfg.ExtraDomains) > 0 {
+		f.SetDomains(cfg.ExtraDomains)
+	}
+	if cfg.ServerKey != "" {
+		if err := f.SetServerPublicKey(cfg.ServerKey); err != nil {
+			return nil, fmt.Errorf("server key: %w", err)
 		}
-		existing.Resolvers = resolvers
-		existing.LastUsed = time.Now().Unix()
-	} else {
-		pl.ActiveLists = append(pl.ActiveLists, ActiveList{
-			Name:      name,
-			Resolvers: resolvers,
-			LastUsed:  time.Now().Unix(),
+	}
+	f.SetActiveResolvers(resolvers)
+	f.SetNoiseDisabled(true) // the main feed fetcher already emits cover traffic
+	pl, _ := s.loadProfiles()
+	qm, rl, sc, to := connectionSettings(pl)
+	if qm == "double" {
+		f.SetQueryMode(protocol.QueryMultiLabel)
+	}
+	if rl > 0 {
+		f.SetRateLimit(rl)
+	}
+	if sc > 1 {
+		f.SetScatter(sc)
+	}
+	f.SetTimeout(time.Duration(to * float64(time.Second)))
+	f.SetLogFunc(func(msg string) { s.addLog(msg) })
+	if main := s.fetcher; main != nil {
+		f.SetStatsForward(func(resolver string, ok bool, latency time.Duration) {
+			if ok {
+				main.RecordSuccess(resolver, latency)
+			} else {
+				main.RecordFailure(resolver)
+			}
 		})
 	}
-	if err := s.saveProfiles(pl); err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	s.writeListsInfo(w)
-}
-
-// handleResolverListAdd appends resolvers (typically picked from the
-// Bank tab) to a named list. Deduped; hot-swaps the fetcher pool when
-// the list is currently selected.
-func (s *Server) handleResolverListAdd(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	var body struct {
-		Name      string   `json:"name"`
-		Resolvers []string `json:"resolvers"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&body); err != nil {
-		http.Error(w, "bad json", 400)
-		return
-	}
-	name := sanitizeListName(body.Name)
-	if name == "" || len(body.Resolvers) == 0 {
-		http.Error(w, "name and resolvers required", 400)
-		return
-	}
-	pl, err := s.loadProfiles()
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	list := findList(pl, name)
-	if list == nil {
-		http.Error(w, "no such list", 404)
-		return
-	}
-	seen := map[string]bool{}
-	for _, r := range list.Resolvers {
-		seen[r] = true
-	}
-	added := 0
-	for _, r := range body.Resolvers {
-		r = strings.TrimSpace(r)
-		if r == "" || seen[r] {
-			continue
-		}
-		list.Resolvers = append(list.Resolvers, r)
-		seen[r] = true
-		added++
-	}
-	list.LastUsed = time.Now().Unix()
-	if err := s.saveProfiles(pl); err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	if added > 0 && strings.EqualFold(strings.TrimSpace(pl.SelectedList), name) {
-		s.mu.RLock()
-		f := s.fetcher
-		s.mu.RUnlock()
-		if f != nil {
-			// Pool widens AND active gains the new entries —
-			// UpdateResolverPool alone only prunes active to the new
-			// pool, never adds, so the freshly-added resolver would
-			// stay invisible in the Active panel until a checker tick.
-			f.UpdateResolverPool(list.Resolvers)
-			f.SetActiveResolvers(list.Resolvers)
-		}
-	}
-	s.broadcast("event: update\ndata: \"resolver-lists\"\n\n")
-	writeJSON(w, map[string]any{"ok": true, "added": added, "count": len(list.Resolvers)})
-}
-
-// handleResolverListRename changes a list's display name. Body:
-// {name, newName}. The selection pointer follows the rename.
-func (s *Server) handleResolverListRename(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	var body struct {
-		Name    string `json:"name"`
-		NewName string `json:"newName"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil {
-		http.Error(w, "bad json", 400)
-		return
-	}
-	from := sanitizeListName(body.Name)
-	to := sanitizeListName(body.NewName)
-	if from == "" || to == "" {
-		http.Error(w, "name and newName required", 400)
-		return
-	}
-	if strings.EqualFold(from, to) {
-		writeJSON(w, map[string]any{"ok": true})
-		return
-	}
-	pl, err := s.loadProfiles()
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	if findList(pl, to) != nil {
-		http.Error(w, "name already used", 409)
-		return
-	}
-	list := findList(pl, from)
-	if list == nil {
-		http.Error(w, "no such list", 404)
-		return
-	}
-	list.Name = to
-	if strings.EqualFold(strings.TrimSpace(pl.SelectedList), from) {
-		pl.SelectedList = to
-	}
-	if err := s.saveProfiles(pl); err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	s.writeListsInfo(w)
-}
-
-// writeListsInfo serialises the named lists. includeResolvers=true
-// expands each entry with its full address list (used by share panel;
-// regular polls skip it to keep responses small).
-func (s *Server) writeListsInfo(w http.ResponseWriter, includeResolvers ...bool) {
-	pl, _ := s.loadProfiles()
-	out := struct {
-		Selected string            `json:"selected"`
-		Lists    []resolverListOut `json:"lists"`
-	}{}
-	if pl == nil {
-		writeJSON(w, out)
-		return
-	}
-	withAddrs := len(includeResolvers) > 0 && includeResolvers[0]
-	out.Selected = pl.SelectedList
-	for _, l := range pl.ActiveLists {
-		entry := resolverListOut{
-			Name:     l.Name,
-			Count:    len(l.Resolvers),
-			LastUsed: l.LastUsed,
-			Selected: strings.EqualFold(strings.TrimSpace(l.Name), strings.TrimSpace(pl.SelectedList)),
-		}
-		if withAddrs {
-			entry.Resolvers = append([]string(nil), l.Resolvers...)
-		}
-		out.Lists = append(out.Lists, entry)
-	}
-	writeJSON(w, out)
-}
-
-// runMediaCacheSweep evicts expired media-cache entries every hour for the
-// lifetime of the process.
-func (s *Server) runMediaCacheSweep() {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-	for range ticker.C {
-		if s.mediaCache == nil {
-			return
-		}
-		s.mediaCache.Cleanup()
-	}
-}
-
-// handleClearCache wipes both the per-channel message cache and the
-// downloaded-media disk cache.
-func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	deleted := 0
-	cacheDir := filepath.Join(s.dataDir, "cache")
-	if entries, err := os.ReadDir(cacheDir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			if os.Remove(filepath.Join(cacheDir, e.Name())) == nil {
-				deleted++
-			}
-		}
-	}
-	if s.telemirror != nil {
-		s.telemirror.ClearCache()
-	}
-	if s.profilePics != nil {
-		s.profilePics.Clear()
-	}
-	mediaDeleted := 0
-	if s.mediaCache != nil {
-		mediaDeleted = s.mediaCache.Clear()
-	}
-	_ = os.Remove(s.channelsCachePath())
-	// Reset in-memory message state too so refreshChannel's "no changes"
-	// guard doesn't skip the next fetch (prev IDs match what's on the
-	// server, but our cache is gone).
-	s.mu.Lock()
-	s.messages = make(map[int][]protocol.Message)
-	s.lastMsgIDs = make(map[int]uint32)
-	s.lastHashes = make(map[int]uint32)
-	s.mu.Unlock()
-	s.addLog(fmt.Sprintf("Cache cleared: %d message files, %d media files", deleted, mediaDeleted))
-	writeJSON(w, map[string]any{"ok": true, "deleted": deleted, "mediaDeleted": mediaDeleted})
+	f.Start(ctx)
+	return f, nil
 }

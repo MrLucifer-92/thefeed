@@ -17,7 +17,6 @@
 		E1000000000000000000E008 /* Mobile.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = D1000000000000000000D008 /* Mobile.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		E1000000000000000000E009 /* ThefeedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1000000000000000000D010 /* ThefeedTests.swift */; };
 		E1000000000000000000E010 /* Mobile.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = D1000000000000000000D008 /* Mobile.xcframework */; };
-		E1000000000000000000E011 /* LanguagePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1000000000000000000D012 /* LanguagePicker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -46,7 +45,6 @@
 		D1000000000000000000D009 /* Thefeed.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Thefeed.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D1000000000000000000D010 /* ThefeedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThefeedTests.swift; sourceTree = "<group>"; };
 		D1000000000000000000D011 /* ThefeedTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ThefeedTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		D1000000000000000000D012 /* LanguagePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanguagePicker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -96,7 +94,6 @@
 				D1000000000000000000D003 /* WebView.swift */,
 				D1000000000000000000D004 /* Bridge.swift */,
 				D1000000000000000000D005 /* ServerController.swift */,
-				D1000000000000000000D012 /* LanguagePicker.swift */,
 				D1000000000000000000D007 /* Assets.xcassets */,
 				D1000000000000000000D006 /* Info.plist */,
 			);
@@ -234,7 +231,6 @@
 				E1000000000000000000E003 /* WebView.swift in Sources */,
 				E1000000000000000000E004 /* Bridge.swift in Sources */,
 				E1000000000000000000E005 /* ServerController.swift in Sources */,
-				E1000000000000000000E011 /* LanguagePicker.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
@@ -96,14 +97,65 @@ var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 // Multi-label:            [hex_part1].[hex_part2].domain
 // All queries are encrypted to prevent DPI detection.
 func EncodeQuery(queryKey [KeySize]byte, channel, block uint16, domain string, mode QueryEncoding) (string, error) {
+	return encodeQuery(queryKey, channel, block, domain, mode, nil)
+}
+
+// EncodeQueryDeterministic produces the same DNS query subdomain every time it
+// is called with the same (key, channel, block, mode, seed). Lets public DNS
+// resolvers cache the response across users who share the seed.
+//
+// Caller is responsible for excluding channels that must never be cached
+// (MetadataChannel and the write channels). Use ChannelEligibleForSharedCache
+// to gate this.
+func EncodeQueryDeterministic(queryKey [KeySize]byte, channel, block uint16, domain string, mode QueryEncoding, seed []byte) (string, error) {
+	if len(seed) == 0 {
+		return "", fmt.Errorf("deterministic seed required")
+	}
+	return encodeQuery(queryKey, channel, block, domain, mode, seed)
+}
+
+// ChannelEligibleForSharedCache reports whether queries on a channel may use
+// a deterministic suffix. False for metadata (clients must always see fresh
+// metadata) and for write/admin channels (each write is unique by design).
+func ChannelEligibleForSharedCache(channel uint16) bool {
+	switch channel {
+	case MetadataChannel,
+		SendChannel, AdminChannel,
+		UpstreamInitChannel, UpstreamDataChannel,
+		ChatChannel:
+		return false
+	}
+	return true
+}
+
+func encodeQuery(queryKey [KeySize]byte, channel, block uint16, domain string, mode QueryEncoding, seed []byte) (string, error) {
 	domain = strings.TrimSuffix(domain, ".")
 	if domain == "" {
 		return "", fmt.Errorf("empty domain")
 	}
 
-	payload := make([]byte, QueryPayloadSize)
+	// In deterministic mode every "random" byte comes from
+	// sha256(domain, seed, channel, block) so the same (server, seed,
+	// channel, block) always produces the same query name. Including the
+	// domain stops accidental collisions between two configs that happen
+	// to share a passphrase.
+	var det [32]byte
+	if seed != nil {
+		h := sha256.New()
+		h.Write([]byte(domain))
+		h.Write([]byte{0}) // separator: avoids domain/seed boundary ambiguity
+		h.Write(seed)
+		var cb [4]byte
+		binary.BigEndian.PutUint16(cb[0:], channel)
+		binary.BigEndian.PutUint16(cb[2:], block)
+		h.Write(cb[:])
+		copy(det[:], h.Sum(nil))
+	}
 
-	if _, err := rand.Read(payload[:QueryPaddingSize]); err != nil {
+	payload := make([]byte, QueryPayloadSize)
+	if seed != nil {
+		copy(payload[:QueryPaddingSize], det[:QueryPaddingSize])
+	} else if _, err := rand.Read(payload[:QueryPaddingSize]); err != nil {
 		return "", fmt.Errorf("random padding: %w", err)
 	}
 
@@ -115,22 +167,51 @@ func EncodeQuery(queryKey [KeySize]byte, channel, block uint16, domain string, m
 		return "", fmt.Errorf("encrypt query: %w", err)
 	}
 
-	// Append 0–4 random suffix bytes so query length varies per request.
-	// The decoder strips these by only using the first aes.BlockSize bytes.
-	suffixLen, _ := rand.Int(rand.Reader, big.NewInt(5)) // [0,4]
-	suffix := make([]byte, int(suffixLen.Int64()))
-	rand.Read(suffix) //nolint:errcheck — non-critical randomness
+	// Append 0–4 suffix bytes. Random in normal mode, derived from det[] in
+	// deterministic mode. The decoder strips these by only using the first
+	// aes.BlockSize bytes.
+	var suffix []byte
+	if seed != nil {
+		suffixLen := int(det[QueryPaddingSize] % 5)
+		suffix = make([]byte, suffixLen)
+		copy(suffix, det[QueryPaddingSize+1:])
+	} else {
+		n, _ := rand.Int(rand.Reader, big.NewInt(5)) // [0,4]
+		suffix = make([]byte, int(n.Int64()))
+		rand.Read(suffix) //nolint:errcheck — non-critical randomness
+	}
 	ciphertext := append(encrypted, suffix...)
 
 	switch mode {
 	case QueryMultiLabel:
 		h := hex.EncodeToString(ciphertext)
-		labels := splitMultiLabel(h)
+		var labels []string
+		if seed != nil {
+			labels = splitMultiLabelDet(h, det[16])
+		} else {
+			labels = splitMultiLabel(h)
+		}
 		return joinQName(labels, domain)
 	default:
 		encoded := strings.ToLower(b32.EncodeToString(ciphertext))
 		return joinQName([]string{encoded}, domain)
 	}
+}
+
+// splitMultiLabelDet is splitMultiLabel with a caller-supplied split index
+// instead of a random one, so the same input always splits the same way.
+func splitMultiLabelDet(h string, rnd byte) []string {
+	if len(h) <= 8 {
+		return []string{h}
+	}
+	minFirst := 8
+	maxFirst := len(h) - 4
+	if maxFirst <= minFirst {
+		maxFirst = minFirst + 1
+	}
+	span := maxFirst - minFirst + 1
+	split := minFirst + int(rnd)%span
+	return []string{h[:split], h[split:]}
 }
 
 // splitMultiLabel splits a hex string into two labels of randomised, unequal length.

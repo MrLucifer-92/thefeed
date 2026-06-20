@@ -2,5 +2,8 @@
 local.properties
 build/
 app/build/
+# gomobile-generated AAR — produced by `make android-bind`. Not
+# committed; CI rebuilds it from ./mobile every release.
+app/libs/*.aar
 *.jks
 *.keystore

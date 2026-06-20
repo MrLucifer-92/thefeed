@@ -29,6 +29,19 @@ android {
         }()
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+
+        // Propagate the universal-build flag to runtime code. After
+        // install Android extracts only one ABI's .so regardless of
+        // whether the source APK was per-arch or universal, so we
+        // can't tell at runtime — the flag has to be baked in here.
+        // Drives which release asset the in-app update prompt links to.
+        buildConfigField "boolean", "IS_UNIVERSAL",
+            project.hasProperty('universalBuild') ? "true" : "false"
+    }
+
+    buildFeatures {
+        // AGP 8 disables BuildConfig generation by default.
+        buildConfig true
     }
 
     signingConfigs {
@@ -64,11 +77,18 @@ android {
         }
     }
 
+    // Build mode controlled by a gradle property:
+    //   ./gradlew assembleRelease                       → 4 per-ABI split APKs
+    //   ./gradlew -PuniversalBuild=true assembleRelease → 1 universal APK
+    //
+    // The universal bundles all 4 ABIs so even older 32-bit Intel
+    // devices install cleanly. Stripped libgojni.so is small enough
+    // (~5–6 MB per ABI) that a 4-ABI universal stays around 22–24 MB.
     splits {
         abi {
-            enable true
+            enable !project.hasProperty('universalBuild')
             reset()
-            include 'arm64-v8a', 'armeabi-v7a'
+            include 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
             universalApk false
         }
     }
@@ -88,4 +108,14 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.activity:activity-ktx:1.10.1'
+
+    // gomobile-generated bindings: in-process Go HTTP server. The .aar
+    // is produced by `make android-bind` (gomobile bind -target=android
+    // -o android/app/libs/mobile.aar ./mobile) and resolved via the
+    // flatDir declared in settings.gradle. Loaded via System.loadLibrary,
+    // which works on all Android versions including 16 KB-page devices,
+    // SELinux-strict custom ROMs, and devices that block exec from
+    // nativeLibraryDir — situations that broke the old subprocess
+    // approach.
+    implementation(name: 'mobile', ext: 'aar')
 }

@@ -11,19 +11,27 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.io.File
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 
+// gomobile-generated bindings (from mobile/mobile.go, package `mobile`).
+// The Go HTTP server runs in-process via a JNI .so loaded from the AAR
+// — no subprocess, no exec from nativeLibraryDir, no PIE/page-size/
+// SELinux pitfalls.
+import mobile.MessageNotifier
+import mobile.Mobile
+import mobile.Server
+
 class ThefeedService : Service() {
-    private var process: Process? = null
-    private var readerThread: Thread? = null
-    private var currentPort: Int = -1
+    private var server: Server? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        createMessageNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Starting local service..."))
-        savePort(-1)  // Clear stale port from any previous (force-killed) session
-        startClientProcessAsync()
+        savePort(-1)
+        startServerAsync()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -31,134 +39,95 @@ class ThefeedService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        // If the process died, restart it
-        if (process == null || !isProcessAlive()) {
-            startClientProcessAsync()
-        }
+        if (server == null) startServerAsync()
         return START_STICKY
     }
 
     override fun onDestroy() {
-        readerThread?.interrupt()
-        readerThread = null
-        process?.destroy()
         try {
-            process?.waitFor()
-        } catch (_: Exception) {
+            server?.stop()
+        } catch (_: Throwable) {
         }
-        process = null
+        server = null
         savePort(-1)
         super.onDestroy()
-        // Kill the entire app process so the activity doesn't remain open
+        // Kill the whole app process so the activity doesn't linger.
         android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun isProcessAlive(): Boolean {
-        return try {
-            process?.exitValue()
-            false // exitValue() returned, so the process has exited
-        } catch (_: IllegalThreadStateException) {
-            true // still running
-        }
-    }
-
-    private fun startClientProcessAsync() {
-        // Don't spawn a second process
-        if (process != null && isProcessAlive()) return
-
+    private fun startServerAsync() {
+        if (server != null) return
         Thread {
             try {
-                val bin = nativeBin()
                 val dataDir = File(filesDir, "thefeeddata")
                 if (!dataDir.exists()) dataDir.mkdirs()
 
-                // Reuse the last port so the WebView origin stays
-                // stable — keeps localStorage state across launches.
-                val selectedPort = pickPort()
-                currentPort = selectedPort
-                savePort(selectedPort)
+                // Pin the server to a port inside PORT_RANGE so the
+                // WebView origin stays stable across launches (otherwise
+                // localStorage resets every time). Kotlin scans for a
+                // free port and passes it to gomobile rather than letting
+                // the kernel pick a high random port.
+                val port = pickPort()
 
-                val env = mutableMapOf<String, String>()
-                env["HOME"] = filesDir.absolutePath
-                env["TMPDIR"] = cacheDir.absolutePath
-                // Tells internal/update to point the user at the APK on
-                // GitHub instead of the bare client binary.
-                env["THEFEED_ANDROID_APK"] = "1"
-
-                val pb = ProcessBuilder(
-                    bin.absolutePath,
-                    "--data-dir", dataDir.absolutePath,
-                    "--port", selectedPort.toString()
-                )
-                pb.directory(dataDir)
-                pb.redirectErrorStream(true)
-                pb.environment().putAll(env)
-
-                process = pb.start()
-
-                readerThread = Thread {
-                    try {
-                        process?.inputStream?.bufferedReader()?.use { reader ->
-                            while (!Thread.currentThread().isInterrupted) {
-                                val line = reader.readLine() ?: break
-                                updateForegroundNotification(line)
-                            }
-                        }
-                    } catch (_: Exception) {
-                    }
+                val s = if (BuildConfig.IS_UNIVERSAL) {
+                    Mobile.newAndroidUniversalServer(dataDir.absolutePath, port.toLong())
+                } else {
+                    Mobile.newAndroidServer(dataDir.absolutePath, port.toLong())
                 }
-                readerThread?.isDaemon = true
-                readerThread?.start()
-
-                updateForegroundNotification("Running on http://127.0.0.1:$selectedPort")
-            } catch (e: Exception) {
+                server = s
+                // The Go background chat poll calls this when new messages land.
+                s.setMessageNotifier(object : MessageNotifier {
+                    override fun onNewMessages(count: Long) {
+                        maybeNotifyNewMessages(count.toInt())
+                    }
+                })
+                val actual = s.port().toInt()
+                savePort(actual)
+                updateForegroundNotification("Running on http://127.0.0.1:$actual")
+            } catch (e: Throwable) {
                 savePort(-1)
                 updateForegroundNotification("Failed: ${e.message ?: e.javaClass.simpleName}")
             }
         }.start()
     }
 
-    /**
-     * The Go binary is packaged as libthefeed.so in jniLibs/ so the package
-     * installer places it in nativeLibraryDir — the only directory Android allows
-     * execution from (W^X policy blocks exec from filesDir on Android 10+).
-     */
-    private fun nativeBin(): File {
-        val bin = File(applicationInfo.nativeLibraryDir, "libthefeed.so")
-        if (!bin.exists()) {
-            throw IllegalStateException(
-                "Native binary missing — reinstall the app. Expected: ${bin.absolutePath}"
-            )
-        }
-        return bin
-    }
-
-    private fun findFreePort(): Int {
-        ServerSocket(0).use { socket ->
-            socket.reuseAddress = true
-            return socket.localPort
+    // tryBind probes whether `port` is bindable on 127.0.0.1. Closes
+    // immediately so gomobile can claim it; SO_REUSEADDR avoids the
+    // TIME_WAIT window from blocking the re-bind.
+    private fun tryBind(port: Int): Boolean {
+        return try {
+            val s = ServerSocket()
+            s.reuseAddress = true
+            s.bind(InetSocketAddress("127.0.0.1", port))
+            s.close()
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
-    // Try the last port first; fall back to a new free one if it's
-    // taken. Keeps localStorage origin stable across launches.
+    // Prefer the previously used port, then scan PORT_RANGE for any
+    // free slot. Falls back to 0 (kernel-assigned) only when the range
+    // is fully taken — in that case localStorage resets, which is
+    // unavoidable.
     private fun pickPort(): Int {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val last = prefs.getInt(PREF_PORT, -1)
-        if (last in 1024..65535) {
-            try {
-                ServerSocket(last).use { it.reuseAddress = true }
-                return last
-            } catch (_: Exception) { }
+        val last = readSavedPort()
+        if (last in PORT_RANGE_MIN..PORT_RANGE_MAX && tryBind(last)) return last
+        for (p in PORT_RANGE_MIN..PORT_RANGE_MAX) {
+            if (tryBind(p)) return p
         }
-        return findFreePort()
+        return 0
+    }
+
+    private fun readSavedPort(): Int {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(PREF_PORT, -1)
     }
 
     private fun savePort(port: Int) {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().putInt(PREF_PORT, port).apply()
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putInt(PREF_PORT, port).apply()
     }
 
     private fun createNotificationChannel() {
@@ -171,8 +140,7 @@ class ThefeedService : Service() {
                 description = "Keeps thefeed client running"
                 setShowBadge(false)
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
@@ -206,18 +174,86 @@ class ThefeedService : Service() {
 
     private fun updateForegroundNotification(message: String) {
         try {
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.notify(NOTIFICATION_ID, buildNotification(message))
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, buildNotification(message))
         } catch (_: Exception) {
-            // Notification permission may not be granted; service still runs
+            // Notification permission may not be granted; service still runs.
+        }
+    }
+
+    // maybeNotifyNewMessages is the native side of the Go MessageNotifier. It is
+    // called from a Go poll goroutine, so it stays cheap and thread-safe. The web
+    // UI handles foreground alerts, so the system notification only fires while
+    // the app is backgrounded.
+    private fun maybeNotifyNewMessages(count: Int) {
+        if (count <= 0 || MainActivity.appInForeground) return
+        // Accumulate across background poll cycles; MainActivity resets this and
+        // cancels the notification when the user reopens the app.
+        pendingNewCount += count
+        postMessageNotification(pendingNewCount)
+    }
+
+    private fun postMessageNotification(total: Int) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val isPersian = (prefs.getString(AndroidBridge.PREF_LANG, "fa") ?: "fa") == "fa"
+        val title = if (isPersian) "پیام جدید" else "thefeed"
+        val text = when {
+            isPersian -> "$total پیام جدید"
+            total > 1 -> "$total new messages"
+            else -> "New message"
+        }
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 2, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, MSG_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        try {
+            getSystemService(NotificationManager::class.java)
+                .notify(MSG_NOTIFICATION_ID, notification)
+        } catch (_: Exception) {
+            // Notification permission not granted — nothing else to do.
+        }
+    }
+
+    private fun createMessageNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                MSG_CHANNEL_ID,
+                "thefeed messages",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "New chat messages"
+                setShowBadge(true)
+            }
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
     companion object {
         const val CHANNEL_ID = "thefeed_service"
+        const val MSG_CHANNEL_ID = "thefeed_messages"
         const val NOTIFICATION_ID = 1201
+        const val MSG_NOTIFICATION_ID = 1202
+        // Running count of new messages seen while backgrounded; MainActivity
+        // resets it (and cancels MSG_NOTIFICATION_ID) on resume.
+        @Volatile
+        @JvmStatic
+        var pendingNewCount = 0
         const val PREFS_NAME = "thefeed_runtime"
         const val PREF_PORT = "port"
         const val ACTION_STOP = "com.thefeed.android.STOP"
+        // Stable port window so the WebView origin survives restarts.
+        const val PORT_RANGE_MIN = 38000
+        const val PORT_RANGE_MAX = 38099
     }
 }

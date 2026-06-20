@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,32 @@ import (
 	"github.com/sartoopjj/thefeed/internal/server"
 	"github.com/sartoopjj/thefeed/internal/web"
 )
+
+// fetchFrontendSource returns index.html concatenated with every JS/CSS asset
+// it references via <script src> / <link href>. Content assertions use this so
+// they keep working now that the static assets are split across module files
+// instead of inlined in index.html.
+func fetchFrontendSource(t *testing.T, base string) string {
+	t.Helper()
+	get := func(path string) string {
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	html := get("/")
+	var sb strings.Builder
+	sb.WriteString(html)
+	re := regexp.MustCompile(`(?:src|href)="(/static/[^"]+\.(?:js|css))"`)
+	for _, m := range re.FindAllStringSubmatch(html, -1) {
+		sb.WriteString("\n")
+		sb.WriteString(get(m[1]))
+	}
+	return sb.String()
+}
 
 func findFreePort(t *testing.T, network string) int {
 	t.Helper()

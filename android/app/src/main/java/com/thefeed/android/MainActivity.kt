@@ -13,6 +13,7 @@ import android.os.PowerManager
 import android.net.Uri
 import android.provider.Settings
 import android.text.InputType
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -31,6 +32,7 @@ import android.app.AlertDialog
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -46,12 +48,20 @@ class MainActivity : ComponentActivity() {
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private var lockScreenVisible = false
 
+    // OpenDocument shows the full system file manager (not just the Photo Picker)
+    // so users can pick any file type, not just images/video.
     private val fileChooserLauncher = registerForActivityResult(
-        ActivityResultContracts.GetContent()
+        ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         fileChooserCallback?.onReceiveValue(if (uri != null) arrayOf(uri) else emptyArray())
         fileChooserCallback = null
     }
+
+    // HTML5 video fullscreen support: WebView calls onShowCustomView when
+    // the page enters fullscreen and onHideCustomView when it exits. Without
+    // these the native player's fullscreen button stays greyed out.
+    private var fullscreenView: View? = null
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -197,6 +207,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        appInForeground = true
+        // Back in the foreground: the in-app UI now shows messages, so clear any
+        // pending "new message" notification + its running count.
+        ThefeedService.pendingNewCount = 0
+        try {
+            NotificationManagerCompat.from(this).cancel(ThefeedService.MSG_NOTIFICATION_ID)
+        } catch (_: Exception) {
+        }
         if (batteryOptRequested) {
             batteryOptRequested = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -208,6 +226,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        appInForeground = false
     }
 
     private fun startThefeedService() {
@@ -257,6 +280,23 @@ class MainActivity : ComponentActivity() {
                     handler.postDelayed({ waitForServerThenLoad() }, RETRY_DELAY_MS)
                 }
             }
+
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?
+            ): Boolean {
+                // The WebView renderer process died (OOM kill or crash — common
+                // under aggressive OEM process management, e.g. MIUI). The dead
+                // WebView can only render a blank/black surface from this point
+                // on; the default (unhandled) behavior kills the whole app.
+                // Recreate the WebView and reload instead.
+                if (view === webView) {
+                    handler.post { recreateWebView() }
+                } else {
+                    view?.destroy()
+                }
+                return true
+            }
         }
 
         // Required for confirm() / alert() / prompt() to work in WebView
@@ -268,8 +308,14 @@ class MainActivity : ComponentActivity() {
             ): Boolean {
                 fileChooserCallback?.onReceiveValue(emptyArray())
                 fileChooserCallback = filePathCallback
-                val accept = fileChooserParams?.acceptTypes?.firstOrNull() ?: "image/*"
-                fileChooserLauncher.launch(accept)
+                // acceptTypes returns [""] (not an empty array) when no accept attribute
+                // is set on the input — filter blanks so we never pass an empty MIME
+                // type to OpenDocument, which would crash on Android.
+                val types = fileChooserParams?.acceptTypes
+                    ?.filter { it.isNotBlank() }
+                    ?.toTypedArray()
+                    ?.takeIf { it.isNotEmpty() } ?: arrayOf("*/*")
+                fileChooserLauncher.launch(types)
                 return true
             }
 
@@ -283,6 +329,27 @@ class MainActivity : ComponentActivity() {
                     .setOnCancelListener { result?.cancel() }
                     .show()
                 return true
+            }
+
+            override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                if (view == null || fullscreenView != null) {
+                    callback?.onCustomViewHidden()
+                    return
+                }
+                fullscreenView = view
+                fullscreenCallback = callback
+                val decor = window.decorView as android.view.ViewGroup
+                decor.addView(view, android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+                WindowCompat.getInsetsController(window, view).apply {
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    hide(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+
+            override fun onHideCustomView() {
+                hideFullscreenView()
             }
         }
 
@@ -299,26 +366,31 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Polls SharedPreferences for the port on every attempt, then probes the URL.
-     * This handles force-kill restarts where the service picks a new port:
-     * the loop follows the port change automatically instead of hammering a stale one.
+     * Polls SharedPreferences for the port on every attempt, then probes
+     * the URL. Status text stays hidden for the first QUIET_ATTEMPTS so
+     * the common in-process-gomobile case (server up in <1 s) doesn't
+     * flash a counter at the user. Only slow starts or outright failures
+     * surface a message.
      */
     private fun waitForServerThenLoad() {
-        setStatus("Waiting for service...")
+        setStatus("")
         Thread {
             var ready = false
             var lastPort = -1
             for (attempt in 1..MAX_PROBE_ATTEMPTS) {
                 val port = getCurrentPort()
                 if (port <= 0) {
-                    handler.post { setStatus("Waiting for service... ($attempt/$MAX_PROBE_ATTEMPTS)") }
+                    if (attempt > QUIET_ATTEMPTS) {
+                        handler.post { setStatus("Waiting for service... ($attempt/$MAX_PROBE_ATTEMPTS)") }
+                    }
                     Thread.sleep(PROBE_INTERVAL_MS)
                     continue
                 }
                 if (port != lastPort) {
-                    // Service restarted with a new port — reset and start fresh
                     lastPort = port
-                    handler.post { setStatus("Connecting...") }
+                    if (attempt > QUIET_ATTEMPTS) {
+                        handler.post { setStatus("Connecting...") }
+                    }
                 }
                 try {
                     val conn = URL("http://127.0.0.1:$port").openConnection() as HttpURLConnection
@@ -336,7 +408,9 @@ class MainActivity : ComponentActivity() {
                 } catch (_: Exception) {
                     // Connection refused — not ready yet
                 }
-                handler.post { setStatus("Waiting for server... ($attempt/$MAX_PROBE_ATTEMPTS)") }
+                if (attempt > QUIET_ATTEMPTS) {
+                    handler.post { setStatus("Waiting for server... ($attempt/$MAX_PROBE_ATTEMPTS)") }
+                }
                 Thread.sleep(PROBE_INTERVAL_MS)
             }
             if (!ready) {
@@ -350,6 +424,37 @@ class MainActivity : ComponentActivity() {
         return prefs.getInt(ThefeedService.PREF_PORT, -1)
     }
 
+    // Exits HTML5 video fullscreen: removes the overlay view, restores the
+    // system bars, and notifies the WebView. Safe to call when not fullscreen.
+    private fun hideFullscreenView() {
+        val v = fullscreenView ?: return
+        val decor = window.decorView as android.view.ViewGroup
+        decor.removeView(v)
+        WindowCompat.getInsetsController(window, webView).show(WindowInsetsCompat.Type.systemBars())
+        fullscreenView = null
+        fullscreenCallback?.onCustomViewHidden()
+        fullscreenCallback = null
+    }
+
+    // Replaces a WebView whose renderer process died with a fresh instance
+    // (same id, position, and layout params) and restarts the load cycle.
+    private fun recreateWebView() {
+        // Drop any orphaned fullscreen video overlay from the dead renderer
+        hideFullscreenView()
+        val parent = webView.parent as? android.view.ViewGroup ?: return
+        val index = parent.indexOfChild(webView)
+        val params = webView.layoutParams
+        val wasVisible = webView.visibility
+        parent.removeView(webView)
+        webView.destroy()
+        webView = WebView(this)
+        webView.id = R.id.webView
+        webView.visibility = wasVisible
+        parent.addView(webView, index, params)
+        configureWebView()
+        if (!lockScreenVisible) waitForServerThenLoad()
+    }
+
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         webView.destroy()
@@ -361,7 +466,17 @@ class MainActivity : ComponentActivity() {
         private const val PROBE_INTERVAL_MS = 1000L   // 1s between probes → up to 30s total
         private const val PROBE_TIMEOUT_MS  = 1000L   // 1s HTTP connect timeout per probe
         private const val RETRY_DELAY_MS    = 2000L   // delay before restarting probe cycle on error
+        // Suppress the "Waiting…" counter for the first N probes — with
+        // in-process gomobile the server is up in <1 s and showing a
+        // counter for that brief window just looks broken.
+        private const val QUIET_ATTEMPTS    = 3
         private const val PREF_BATTERY_OPT_DECLINED = "battery_opt_declined"
+
+        // Read by ThefeedService (from a Go poll thread) to decide whether a new
+        // message warrants a system notification — foreground alerts are the web
+        // UI's job, so the service only notifies while the app is backgrounded.
+        @Volatile
+        var appInForeground = false
     }
 }
 

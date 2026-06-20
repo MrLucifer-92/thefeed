@@ -41,11 +41,17 @@ func (tr *TelegramReader) fetchProfilePhoto(ctx context.Context, api *tg.Client,
 	return tr.downloadTelegramFile(ctx, api, loc, 0)
 }
 
-// fetchAllProfilePhotos downloads each channel's avatar (skipping
-// unchanged photoIDs) and merges them into the feed bundle.
-// Best-effort: per-channel failures are logged and skipped.
+// fetchAllProfilePhotos downloads avatars (public by username,
+// private by privateChannelID) and merges them into the feed bundle.
+// Per-channel failures are logged and skipped.
 func (tr *TelegramReader) fetchAllProfilePhotos(ctx context.Context, api *tg.Client) {
-	pics := make(map[string][]byte, len(tr.channels))
+	totalSlots := len(tr.channels)
+	if tr.privates != nil {
+		totalSlots += len(tr.privates.ordered)
+	}
+	pics := make(map[string][]byte, totalSlots)
+
+	// Public channels.
 	for _, username := range tr.channels {
 		if ctx.Err() != nil {
 			return
@@ -82,6 +88,40 @@ func (tr *TelegramReader) fetchAllProfilePhotos(ctx context.Context, api *tg.Cli
 		tr.lastPhotoID[username] = rp.photoID
 		tr.mu.Unlock()
 	}
+
+	// Private channels — keyed by privateChannelID to match the Feed
+	// Name.
+	if tr.privates != nil {
+		for _, hash := range tr.privates.ordered {
+			if ctx.Err() != nil {
+				return
+			}
+			rp, ok := tr.privates.get(hash)
+			if !ok || rp.photoID == 0 {
+				continue
+			}
+			key := privateChannelID(hash)
+			tr.mu.Lock()
+			if tr.lastPhotoID == nil {
+				tr.lastPhotoID = map[string]int64{}
+			}
+			prevID, hadPrev := tr.lastPhotoID[key]
+			tr.mu.Unlock()
+			if hadPrev && prevID == rp.photoID {
+				continue
+			}
+			body, err := tr.fetchProfilePhoto(ctx, api, rp.peer, rp.photoID)
+			if err != nil {
+				log.Printf("[profile-pics] download private %s (id=%d): %v", rp.title, rp.photoID, err)
+				continue
+			}
+			pics[key] = body
+			tr.mu.Lock()
+			tr.lastPhotoID[key] = rp.photoID
+			tr.mu.Unlock()
+		}
+	}
+
 	if len(pics) == 0 {
 		return
 	}

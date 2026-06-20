@@ -68,6 +68,39 @@ func Decrypt(key [KeySize]byte, ciphertext []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext[gcm.NonceSize():], nil)
 }
 
+// GCMNonceSize is the AES-GCM nonce length (carried in the chat envelope).
+const GCMNonceSize = 12
+
+// EncryptWithNonce seals plaintext under key with an explicit (caller-supplied)
+// nonce. The nonce MUST be unique per key; the chat envelope uses a fresh random
+// one per message so a repeated (src,dst,seq) — e.g. the same recipient on two
+// servers — never reuses the keystream. Output is ciphertext+tag (no nonce).
+func EncryptWithNonce(key [KeySize]byte, nonce, plaintext []byte) ([]byte, error) {
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) != gcm.NonceSize() {
+		return nil, fmt.Errorf("bad nonce size %d", len(nonce))
+	}
+	return gcm.Seal(nil, nonce, plaintext, nil), nil
+}
+
+// DecryptWithNonce reverses EncryptWithNonce.
+func DecryptWithNonce(key [KeySize]byte, nonce, ct []byte) ([]byte, error) {
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) != gcm.NonceSize() {
+		return nil, fmt.Errorf("bad nonce size %d", len(nonce))
+	}
+	if len(ct) < gcm.Overhead() {
+		return nil, fmt.Errorf("ciphertext too short: %d bytes", len(ct))
+	}
+	return gcm.Open(nil, nonce, ct, nil)
+}
+
 // encryptQueryBlock encrypts an 8-byte query payload using a direct AES-256 block cipher.
 // The payload is expanded to one AES block (16 bytes) with 8 trailing zero bytes before
 // encryption. No nonce or auth tag needed: the 4 random bytes in the payload guarantee

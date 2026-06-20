@@ -228,20 +228,20 @@ func TestParseXRSSMessages_QuoteTweet(t *testing.T) {
 }
 
 func TestParseXRSSMessages_PureRetweet(t *testing.T) {
-	// Pure retweet: link points to IranIntlTV, but the feed is for RezaVaisi.
+	// Pure retweet: link points to SourceUser, but the feed is for FeedUser.
 	// Nitter does NOT add any RT prefix — the only signal is the username mismatch.
 	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <rss><channel>
   <item>
-    <title>Original content by Iran Intl</title>
-    <link>https://nitter.net/IranIntlTV/status/2041909367206015289</link>
-    <guid>https://nitter.net/IranIntlTV/status/2041909367206015289</guid>
-    <description><![CDATA[<p>What follows is a list of fifty-two senior officials...</p><p>✍️ <a href="/RezaVaisi">@RezaVaisi</a></p><p>content.iranintl.com/senior-…</p>]]></description>
+    <title>Original content by Example News</title>
+    <link>https://nitter.net/SourceUser/status/2041909367206015289</link>
+    <guid>https://nitter.net/SourceUser/status/2041909367206015289</guid>
+    <description><![CDATA[<p>What follows is a list of fifty-two senior officials...</p><p>✍️ <a href="/FeedUser">@FeedUser</a></p><p>content.example.com/senior-…</p>]]></description>
     <pubDate>Mon, 30 Mar 2026 06:00:00 +0000</pubDate>
   </item>
 </channel></rss>`)
 
-	msgs, _, err := parseXRSSMessages(body, "RezaVaisi")
+	msgs, _, err := parseXRSSMessages(body, "FeedUser")
 	if err != nil {
 		t.Fatalf("parseXRSSMessages: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestParseXRSSMessages_PureRetweet(t *testing.T) {
 		t.Fatalf("len(msgs) = %d, want 1", len(msgs))
 	}
 	text := msgs[0].Text
-	if !strings.HasPrefix(text, "--------- Repost from @IranIntlTV ---------") {
+	if !strings.HasPrefix(text, "--------- Repost from @SourceUser ---------") {
 		t.Fatalf("pure retweet not annotated; got: %q", text)
 	}
 	if !strings.Contains(text, "fifty-two senior officials") {

@@ -1,0 +1,257 @@
+    @font-face {
+      font-family: 'Vazirmatn';
+      src: url('/static/Vazirmatn-Regular.woff2') format('woff2');
+      font-weight: normal;
+      font-style: normal;
+      font-display: swap
+    }
+
+    /* Custom SVG icons (see js/icons.js). Inline-size to the surrounding text so
+       they replace the old emoji glyphs 1:1 regardless of the SVG's own
+       width/height attributes. */
+    .icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      vertical-align: -0.125em;
+      line-height: 0;
+    }
+
+    .icon svg {
+      width: 1.15em;
+      height: 1.15em;
+      display: block;
+    }
+
+    /* Standalone icon buttons render at ONE consistent size (Apple toolbar
+       icons share a fixed optical size, not one scaled per control). Icons
+       that sit inline with a text label keep the 1.15em default above so they
+       track the label. Tiny by-design glyphs (⋮ row menu, ⓘ help) are left
+       out — a 22px icon can't fit their 16–18px buttons. */
+    .icon-btn[data-icon] .icon svg,
+    .back-btn .icon svg,
+    .send-btn .icon svg,
+    .scroll-down-btn .icon svg,
+    .tm-back .icon svg,
+    .tm-menu .icon svg,
+    .tm-refresh .icon svg,
+    .tm-scroll-down .icon svg,
+    .ch-pin .icon svg,
+    .ch-autoupdate .icon svg,
+    .rb-row-btn .icon svg,
+    .media-action-icon .icon svg,
+    .media-file-btn .icon svg {
+      width: var(--icon-size);
+      height: var(--icon-size);
+    }
+
+    /* RTL: the telemirror back button is repositioned by the layout flip,
+       but the SVG inside still points left — mirror it so "back" points
+       right. The main chat .back-btn keeps its position in RTL, so its
+       arrow must NOT be flipped. */
+    [dir="rtl"] .tm-back .icon svg {
+      transform: scaleX(-1);
+    }
+
+    :root {
+      --bg: #17212b;
+      --bg2: #0e1621;
+      --sidebar-bg: #0e1621;
+      --surface: #182533;
+      --surface2: #1d2b3a;
+      --border: #1c2938;
+      --accent: #3390ec;
+      --accent-hover: #2b7dd6;
+      --text: #f5f5f5;
+      --text-dim: #8b9eb0;
+      --success: #4fae4e;
+      --error: #e53935;
+      --send-color: #3390ec;
+      --msg-in: #182533;
+      --msg-out: #2b5278;
+      --hover: #1e2c3a;
+      --font-size: 14px;
+      --safe-top: env(safe-area-inset-top);
+      --safe-right: env(safe-area-inset-right);
+      --safe-bottom: env(safe-area-inset-bottom);
+      --safe-left: env(safe-area-inset-left);
+      /* ----- Apple-HIG design tokens (dark) ----- */
+      /* Surfaces */
+      --card-bg: #1d2b3a;        /* was undefined — used by .rb-row/.rtab */
+      --bg-elevated: #1d2b3a;    /* was undefined — elevated surfaces (telemirror) */
+      --text-secondary: #8b9eb0; /* was undefined — secondary text (media) */
+      /* Spacing — 4px base grid */
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 20px;
+      --space-6: 24px;
+      --space-8: 32px;
+      /* Corner radii */
+      --radius-xs: 4px;
+      --radius-sm: 6px;
+      --radius-md: 8px;     /* default control radius */
+      --radius-lg: 10px;
+      --radius-xl: 12px;    /* cards */
+      --radius-2xl: 16px;   /* modals */
+      --radius-pill: 999px;
+      /* Type scale (maps to Apple text styles) */
+      --text-2xs: 11px;     /* caption2 */
+      --text-xs: 12px;      /* caption */
+      --text-sm: 13px;      /* footnote */
+      --text-base: 14px;    /* subhead / app base */
+      --text-md: 15px;      /* callout */
+      --text-lg: 16px;      /* body */
+      --text-xl: 17px;      /* headline (semibold) */
+      --text-2xl: 20px;     /* title3 */
+      --text-3xl: 22px;     /* title2 */
+      /* Weights */
+      --weight-regular: 400;
+      --weight-medium: 500;
+      --weight-semibold: 600;
+      /* Motion — Apple standard ease + durations */
+      --ease: cubic-bezier(0.4, 0, 0.2, 1);
+      --motion-fast: 120ms;
+      --motion: 200ms;
+      --motion-slow: 320ms;
+      /* Elevation */
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, .3);
+      --shadow-md: 0 4px 12px rgba(0, 0, 0, .35);
+      --shadow-lg: 0 8px 30px rgba(0, 0, 0, .5);
+      /* Hit target (HIG minimum 44pt) */
+      --hit: 44px;
+      /* Standalone toolbar/nav icon size (consistent optical size) */
+      --icon-size: 22px;
+      /* Focus ring */
+      --focus-ring: 0 0 0 2px var(--bg2), 0 0 0 4px var(--accent);
+    }
+
+    /* Android WebView lays the page out below the system bars and reports
+       phantom safe-area insets — zero them out so we don't double-pad. */
+    html.is-android-app {
+      --safe-top: 0px;
+      --safe-right: 0px;
+      --safe-bottom: 0px;
+      --safe-left: 0px;
+    }
+
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --bg2: #f0f2f5;
+      --sidebar-bg: #f0f2f5;
+      --surface: #ffffff;
+      --surface2: #e8eaed;
+      --border: #d3d6da;
+      --accent: #3390ec;
+      --accent-hover: #2b7dd6;
+      --text: #1a1a1a;
+      --text-dim: #707579;
+      --success: #4fae4e;
+      --error: #e53935;
+      --send-color: #3390ec;
+      --msg-in: #ffffff;
+      --msg-out: #d3eafe;
+      --hover: #e8eaed;
+      --card-bg: #ffffff;
+      --bg-elevated: #ffffff;
+      --text-secondary: #707579;
+      --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+      --space-5: 20px; --space-6: 24px; --space-8: 32px;
+      --radius-xs: 4px; --radius-sm: 6px; --radius-md: 8px; --radius-lg: 10px;
+      --radius-xl: 12px; --radius-2xl: 16px; --radius-pill: 999px;
+      --text-2xs: 11px; --text-xs: 12px; --text-sm: 13px; --text-base: 14px;
+      --text-md: 15px; --text-lg: 16px; --text-xl: 17px; --text-2xl: 20px; --text-3xl: 22px;
+      --weight-regular: 400; --weight-medium: 500; --weight-semibold: 600;
+      --ease: cubic-bezier(0.4, 0, 0.2, 1);
+      --motion-fast: 120ms; --motion: 200ms; --motion-slow: 320ms;
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, .12);
+      --shadow-md: 0 4px 12px rgba(0, 0, 0, .16);
+      --shadow-lg: 0 8px 30px rgba(0, 0, 0, .22);
+      --hit: 44px;
+      --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent
+    }
+
+    /* Touch devices: clear :hover immediately so tap highlight doesn't stick */
+    @media (hover: none) {
+      button, a, [onclick] {
+        transition-duration: 0ms !important;
+      }
+    }
+
+    /* iOS Safari / WKWebView "automatic text inflation" inflates body text
+       to its own heuristic size and ignores our explicit font-size, so the
+       Settings → Font size slider appears to do nothing on iOS. Disabling
+       text-size-adjust lets our --font-size variable actually take effect. */
+    html {
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Vazirmatn', 'SF Pro Text', system-ui, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      background: var(--bg2);
+      color: var(--text);
+      height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
+      font-size: var(--font-size);
+      line-height: 1.4;
+      letter-spacing: -0.01em;
+      padding-top: var(--safe-top);
+      padding-bottom: var(--safe-bottom);
+      padding-left: var(--safe-left);
+      padding-right: var(--safe-right)
+    }
+
+    button {
+      cursor: pointer;
+      font-family: inherit
+    }
+
+    input,
+    textarea,
+    select {
+      font-family: inherit
+    }
+
+    /* ----- Global keyboard focus (HIG: always-visible focus) ----- */
+    :where(button, a, input, select, textarea, [role="button"], [tabindex]):focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    /* ----- Minimum 44px hit area for small icon buttons, without
+       changing their visual size: a centered transparent overlay. ----- */
+    .rb-row-btn, .rtab-menu-btn, .help-toggle, .ch-pin {
+      position: relative;
+    }
+
+    .rb-row-btn::before, .rtab-menu-btn::before,
+    .help-toggle::before, .ch-pin::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: var(--hit);
+      height: var(--hit);
+      transform: translate(-50%, -50%);
+    }
+
+    /* ----- Respect the system "Reduce Motion" setting ----- */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+      }
+    }

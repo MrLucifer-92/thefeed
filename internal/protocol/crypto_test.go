@@ -5,6 +5,39 @@ import (
 	"testing"
 )
 
+func TestEncryptWithNonceRoundTrip(t *testing.T) {
+	var k [KeySize]byte
+	k[2] = 1
+	nonce := make([]byte, GCMNonceSize)
+	nonce[0] = 7
+	pt := []byte("per-message nonce")
+	ct, err := EncryptWithNonce(k, nonce, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ct) != len(pt)+16 { // ciphertext + full GCM tag, nonce carried separately
+		t.Fatalf("ct len = %d", len(ct))
+	}
+	got, err := DecryptWithNonce(k, nonce, ct)
+	if err != nil || string(got) != string(pt) {
+		t.Fatalf("decrypt: %v %q", err, got)
+	}
+	// Tampered ciphertext, wrong nonce, and wrong-size nonce all reject.
+	bad := append([]byte(nil), ct...)
+	bad[0] ^= 1
+	if _, err := DecryptWithNonce(k, nonce, bad); err == nil {
+		t.Fatal("tamper accepted")
+	}
+	wrong := make([]byte, GCMNonceSize)
+	wrong[0] = 8
+	if _, err := DecryptWithNonce(k, wrong, ct); err == nil {
+		t.Fatal("wrong nonce accepted")
+	}
+	if _, err := EncryptWithNonce(k, nonce[:4], pt); err == nil {
+		t.Fatal("short nonce accepted")
+	}
+}
+
 func TestDeriveKeys(t *testing.T) {
 	qk1, rk1, err := DeriveKeys("test-passphrase")
 	if err != nil {

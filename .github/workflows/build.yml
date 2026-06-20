@@ -2,9 +2,7 @@ name: Build
 
 on:
   push:
-    tags:
-      - 'v*'
-      - '!v*-ios*'   # iOS-only tags are handled by ios-release.yml
+    tags: ['v*']
 
 permissions:
   contents: write
@@ -69,8 +67,37 @@ jobs:
           restore-keys: gobuild-${{ matrix.goos }}-${{ matrix.goarch }}-
 
       - name: Install UPX
-        if: matrix.goos == 'linux' || matrix.goos == 'windows'
+        if: matrix.goos == 'linux'
         run: sudo apt-get install -y upx-ucl
+
+      # Embed PE version info (CompanyName, FileDescription, FileVersion,
+      # …) into the Windows .exe so Defender / Kaspersky / heuristic
+      # engines don't flag an unsigned Go binary as anonymous malware.
+      # Without these resources, untouched Go binaries on Windows show
+      # up almost universally as Trojan:Win32/Wacatac.B!ml or similar.
+      - name: Generate Windows PE resources
+        if: matrix.goos == 'windows'
+        run: |
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          VERSION=${GITHUB_REF_NAME:-dev}
+          VER_NUM="${VERSION#v}"
+          # Strip any -dirty / -rc / commit suffix so the numeric
+          # FixedFileInfo accepts the parse. The StringFileInfo path
+          # below keeps the full original tag.
+          NUM_ONLY=$(echo "$VER_NUM" | grep -oE '^[0-9]+(\.[0-9]+)*' || echo "0.0.0")
+          V_MAJ=$(echo "$NUM_ONLY" | awk -F. '{print $1+0}')
+          V_MIN=$(echo "$NUM_ONLY" | awk -F. '{print $2+0}')
+          V_PATCH=$(echo "$NUM_ONLY" | awk -F. '{print $3+0}')
+          for d in cmd/server cmd/client; do
+            (cd "$d" && goversioninfo \
+              -ver-major="$V_MAJ" \
+              -ver-minor="$V_MIN" \
+              -ver-patch="$V_PATCH" \
+              -product-version="$VER_NUM" \
+              -file-version="$VER_NUM" \
+              -o resource_windows_amd64.syso \
+              versioninfo.json)
+          done
 
       - name: Build Server
         if: matrix.goos != 'android'
@@ -100,10 +127,10 @@ jobs:
           ext=""
           BUILD_MODE=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          # AssetTemplate matches the published filename in the
-          # thefeed-files repo so the in-app update prompt links straight
+          # AssetTemplate matches the published filename in this repo's
+          # GitHub Releases so the in-app update prompt links straight
           # to the right binary. {V} is replaced at runtime with the
-          # version string read from the public VERSION file.
+          # version tag parsed from /releases/latest.
           if [ "${{ matrix.goos }}" = "android" ]; then
             ASSET_TEMPLATE="thefeed-client-android-${{ matrix.goarch }}"
           else
@@ -116,6 +143,13 @@ jobs:
           # Force PIE for the binaries that ship inside the APK.
           if [ "${{ matrix.goos }}" = "android" ]; then
             BUILD_MODE="-buildmode=pie"
+            # Android 15+ ships devices configured for 16 KB memory pages.
+            # NDK r28+ defaults to 16 KB alignment but GitHub runners still
+            # default to r27 (4 KB). Force 16 KB alignment so the binary
+            # is mmap-able on 16 KB-page devices; on 4 KB devices the
+            # extra padding is harmless. GitLab CI pins NDK r28b and
+            # passes the same flag for consistency.
+            LDFLAGS="${LDFLAGS} -extldflags=-Wl,-z,max-page-size=16384"
           fi
           # Android: build with cgo so DNS resolution goes through bionic
           # libc / netd instead of Go's pure-Go resolver, which on Android
@@ -143,7 +177,15 @@ jobs:
           go build -trimpath -buildvcs=false $BUILD_MODE -ldflags="${LDFLAGS}" -o "$out" ./cmd/client
 
       - name: Compress with UPX
-        if: matrix.goos == 'linux' || matrix.goos == 'windows'
+        # Windows is excluded: UPX-packed PE binaries trigger generic
+        # AV heuristics (Defender's Wacatac/Trojan:Win32/Wacatac.B!ml,
+        # Kaspersky Boogr.gsh, multiple ClamAV signatures) almost
+        # universally. The compression saves ~10 MB per release artifact
+        # at the cost of false-positive flags on every Windows download.
+        # Ship plain Go binaries for Windows; users see the binary as
+        # untrusted-publisher but not as malware. Linux UPX still on —
+        # Linux AV engines are far less heuristic about packers.
+        if: matrix.goos == 'linux'
         run: |
           # Keep best/lzma for small binaries; xargs -P does them
           # in parallel across CPUs so wall time stays low.
@@ -157,25 +199,42 @@ jobs:
           path: build/
 
   android-apk:
-    needs: build
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/setup-go@v5
         with:
-          path: artifacts
-          merge-multiple: true
+          go-version: '1.26'
 
-      - name: Stage Android client binary as JNI library
+      - name: Install gomobile
         run: |
-          mkdir -p android/app/src/main/jniLibs/arm64-v8a
-          mkdir -p android/app/src/main/jniLibs/armeabi-v7a
-          test -f artifacts/thefeed-client-android-arm64
-          test -f artifacts/thefeed-client-android-arm
-          cp artifacts/thefeed-client-android-arm64 android/app/src/main/jniLibs/arm64-v8a/libthefeed.so
-          cp artifacts/thefeed-client-android-arm android/app/src/main/jniLibs/armeabi-v7a/libthefeed.so
+          # gomobile init expects $ANDROID_HOME (and $ANDROID_NDK_HOME)
+          # to point at a real SDK + NDK. ubuntu-latest sets these as
+          # runner-process env vars (ANDROID_HOME, ANDROID_NDK_LATEST_HOME).
+          # Re-export ANDROID_NDK_HOME because gomobile reads that name.
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
+
+      - name: Build gomobile AAR
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          VERSION=${GITHUB_REF_NAME:-dev}
+          COMMIT=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # -s -w drops the symbol table + DWARF (saves ~12 MB per
+          # ABI). 16 KB page alignment is required on Android 15+
+          # devices configured for 16 KB pages — NDK r28+ defaults to
+          # this; explicit flag works on older NDKs too.
+          LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -extldflags=-Wl,-z,max-page-size=16384"
+          mkdir -p android/app/libs
+          gomobile bind -target=android/arm,android/arm64,android/386,android/amd64 -androidapi 24 \
+            -ldflags="${LDFLAGS}" -o android/app/libs/mobile.aar ./mobile
 
       - name: Decode signing keystore
         env:
@@ -197,6 +256,9 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Stage artifacts dir
+        run: mkdir -p artifacts
+
       - name: Build Android APK
         working-directory: android
         env:
@@ -208,13 +270,22 @@ jobs:
           if [ ! -x ./gradlew ]; then gradle wrapper --gradle-version 8.10.2; fi
           if [ -f app/keystore.jks ]; then BT=release; TASK=assembleRelease; else BT=debug; TASK=assembleDebug; fi
 
-          # No `clean` — fresh checkout is already clean and the
-          # Gradle build cache can reuse work between runs.
+          # Pass 1 — per-ABI split APKs (arm, arm64, x86, x86_64).
+          # No `clean` so the Gradle build cache can reuse work
+          # between runs.
           ./gradlew --no-daemon --build-cache $TASK
 
           APK_DIR=app/build/outputs/apk/$BT
           cp "$APK_DIR"/app-arm64-v8a-${BT}.apk    ../artifacts/thefeed-android-${VERSION}-arm64-v8a.apk
           cp "$APK_DIR"/app-armeabi-v7a-${BT}.apk  ../artifacts/thefeed-android-${VERSION}-armeabi-v7a.apk
+          cp "$APK_DIR"/app-x86-${BT}.apk          ../artifacts/thefeed-android-${VERSION}-x86.apk
+          cp "$APK_DIR"/app-x86_64-${BT}.apk       ../artifacts/thefeed-android-${VERSION}-x86_64.apk
+
+          # Pass 2 — universal APK (arm + arm64 + x86_64, x86 stripped).
+          # Different gradle property → different output layout, so the
+          # pass-1 split APKs above are safe.
+          ./gradlew --no-daemon --build-cache -PuniversalBuild=true $TASK
+          cp "$APK_DIR"/app-${BT}.apk              ../artifacts/thefeed-android-${VERSION}-universal.apk
 
       - name: Upload Android APK artifacts
         uses: actions/upload-artifact@v4
@@ -223,9 +294,107 @@ jobs:
           path: |
             artifacts/thefeed-android-*-arm64-v8a.apk
             artifacts/thefeed-android-*-armeabi-v7a.apk
+            artifacts/thefeed-android-*-x86.apk
+            artifacts/thefeed-android-*-x86_64.apk
+            artifacts/thefeed-android-*-universal.apk
+
+  ios-ipa:
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install gomobile + gobind
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
+          go get golang.org/x/mobile/bind golang.org/x/mobile/bind/objc
+          go mod tidy
+
+      - name: Build Mobile.xcframework
+        run: |
+          VERSION=${GITHUB_REF_NAME:-dev}
+          COMMIT=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
+          gomobile bind -iosversion=14.0 -target=ios,iossimulator -ldflags="${LDFLAGS}" -o ios/Mobile.xcframework ./mobile
+
+      - name: Archive (unsigned)
+        run: |
+          VERSION=${GITHUB_REF_NAME:-dev}
+          MARKETING_VERSION=${VERSION#v}
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          xcodebuild \
+            -project ios/Thefeed.xcodeproj \
+            -scheme Thefeed \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/Thefeed.xcarchive \
+            archive \
+            MARKETING_VERSION="${MARKETING_VERSION}" \
+            CURRENT_PROJECT_VERSION="${BUILD_NUMBER}" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM=""
+
+      - name: Pack unsigned IPA
+        run: |
+          VERSION=${GITHUB_REF_NAME:-dev}
+          mkdir -p build/Payload
+          cp -r build/Thefeed.xcarchive/Products/Applications/Thefeed.app build/Payload/
+          (cd build && zip -qry "thefeed-ios-${VERSION}-unsigned.ipa" Payload)
+          ls -lh build/*.ipa
+
+      - name: Upload iOS IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thefeed-ios-ipa
+          path: build/thefeed-ios-*-unsigned.ipa
+
+  macos-dmg:
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Cache Go build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: gobuild-macos-dmg-${{ hashFiles('**/go.sum') }}
+          restore-keys: gobuild-macos-dmg-
+
+      # `make mac-dmg` does the heavy lifting (universal binary via
+      # lipo, .app bundle, .icns from the iOS icon, hdiutil DMG).
+      # macos-14 runners ship Xcode tools, so lipo/sips/iconutil/
+      # hdiutil are all on PATH.
+      - name: Build macOS DMG
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          make mac-dmg VERSION="${VERSION}"
+          ls -lh build/thefeed-macos-*.dmg
+
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thefeed-macos-dmg
+          path: build/thefeed-macos-*.dmg
 
   release:
-    needs: [build, android-apk]
+    needs: [build, android-apk, ios-ipa, macos-dmg]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -251,8 +420,20 @@ jobs:
             | Linux | arm64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-linux-arm64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-linux-arm64) |
             | macOS | amd64 (Intel) | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-darwin-amd64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-darwin-amd64) |
             | macOS | arm64 (Apple Silicon) | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-darwin-arm64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-darwin-arm64) |
+            | macOS | universal `.dmg` (drag-install, **recommended**) | [thefeed-macos-${{ github.ref_name }}.dmg - مک (نصب با کشیدن، توصیه‌شده)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-macos-${{ github.ref_name }}.dmg) |
             | FreeBSD | amd64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-freebsd-amd64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-freebsd-amd64) |
             | FreeBSD | arm64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-freebsd-arm64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-freebsd-arm64) |
             | Windows | amd64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-windows-amd64.exe) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-windows-amd64.exe) |
-            | Android | arm64-v8a (most modern phones) | [thefeed-android-${{ github.ref_name }}-arm64-v8a.apk - اندروید (گوشی‌های جدید)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-arm64-v8a.apk) |
+            | Android | universal (all ABIs, **recommended**) | [thefeed-android-${{ github.ref_name }}-universal.apk - اندروید (یونیورسال، توصیه‌شده)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-universal.apk) |
+            | Android | arm64-v8a (modern phones, smaller) | [thefeed-android-${{ github.ref_name }}-arm64-v8a.apk - اندروید (گوشی‌های جدید)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-arm64-v8a.apk) |
             | Android | armeabi-v7a (older 32-bit phones) | [thefeed-android-${{ github.ref_name }}-armeabi-v7a.apk - اندروید (دستگاه‌های قدیمی‌تر)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-armeabi-v7a.apk) |
+            | Android | x86_64 (Chromebooks, emulators, WSA) | [thefeed-android-${{ github.ref_name }}-x86_64.apk - اندروید (کروم‌بوک، شبیه‌ساز، WSA)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-x86_64.apk) |
+            | Android | x86 (32-bit Intel, niche) | [thefeed-android-${{ github.ref_name }}-x86.apk - اندروید (اینتل ۳۲ بیت، نادر)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-x86.apk) |
+            | iOS / iPadOS | TestFlight (**easiest — installs in one tap**) | [Join the TestFlight beta - نصب آسان روی آیفون](https://testflight.apple.com/join/J6bfxDdZ) |
+            | iOS (unsigned) | universal `.ipa` | [thefeed-ios-${{ github.ref_name }}-unsigned.ipa](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-ios-${{ github.ref_name }}-unsigned.ipa) |
+
+            **iOS / iPadOS (preview, iOS 14+):** the easiest install is the public [TestFlight beta](https://testflight.apple.com/join/J6bfxDdZ) — one tap, no computer needed. Otherwise the `.ipa` below is unsigned: re-sign it with your own Apple ID and provisioning profile (AltStore, Sideloadly, or `xcrun altool`). The `.ipa` will not install directly from a download.
+
+            **macOS `.dmg` (preview, macOS 11+):** universal binary (Intel + Apple Silicon), unsigned. After dragging Thefeed.app into Applications, the first launch needs right-click → Open, or run `xattr -dr com.apple.quarantine /Applications/Thefeed.app` to clear Gatekeeper. CLI users can still grab the bare `thefeed-server` / `thefeed-client` binaries above.
+
+            **Windows (10/11):** the `.exe` is **unsigned**, so SmartScreen shows *"Windows protected your PC"* and Defender may flag it as a false positive — DNS-tunneling tools commonly trip AV heuristics; **this is not malware**. Click **More info → Run anyway**, and if it's quarantined restore it from Defender → *Protection history*. Verify the SHA-256 below if unsure. — این هشدار طبیعی است (فایل امضای دیجیتال ندارد)؛ روی **More info → Run anyway** بزنید.

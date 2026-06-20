@@ -1,0 +1,16 @@
+# Telegram private-channel invite links (one per line).
+# Requires the server to be logged into Telegram — the running session
+# joins each channel at startup and then fetches messages from it like
+# any other channel. Channel numbers continue after the public list
+# in channels.txt.
+#
+# Any of these link shapes is accepted:
+#   https://t.me/+aBcDeF123456-_
+#   https://t.me/joinchat/aBcDeF123456
+#   t.me/+aBcDeF123456
+#   tg://join?invite=aBcDeF123456
+#   +aBcDeF123456
+#   aBcDeF123456
+#
+# Lines starting with # are comments. Empty lines are ignored.
+# Duplicates are de-duplicated on load.

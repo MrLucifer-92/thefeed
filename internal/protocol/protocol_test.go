@@ -35,6 +35,39 @@ func TestSerializeParseMetadata(t *testing.T) {
 	}
 }
 
+func TestMetadataFlags(t *testing.T) {
+	for _, tc := range []struct {
+		tg, chat bool
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		m := &Metadata{TelegramLoggedIn: tc.tg, ChatAvailable: tc.chat}
+		got, err := ParseMetadata(SerializeMetadata(m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.TelegramLoggedIn != tc.tg || got.ChatAvailable != tc.chat {
+			t.Fatalf("flags tg=%v chat=%v -> got tg=%v chat=%v", tc.tg, tc.chat, got.TelegramLoggedIn, got.ChatAvailable)
+		}
+	}
+}
+
+func TestChatAvailableFromBlock0(t *testing.T) {
+	// The flag is readable from block 0 alone (no full parse), and matches the
+	// full ParseMetadata — this is what lets the client skip the ChatInfo probe
+	// on a chatless server.
+	for _, chat := range []bool{false, true} {
+		b0 := SerializeMetadata(&Metadata{ChatAvailable: chat, TelegramLoggedIn: true})
+		got, ok := ChatAvailableFromBlock0(b0)
+		if !ok || got != chat {
+			t.Fatalf("chat=%v -> got=%v ok=%v", chat, got, ok)
+		}
+	}
+	// A block too short to hold the flags byte reports ok=false (caller then
+	// falls back to the full probe rather than wrongly skipping).
+	if _, ok := ChatAvailableFromBlock0(make([]byte, 8)); ok {
+		t.Fatal("short block should report ok=false")
+	}
+}
+
 func TestSerializeParseMessages(t *testing.T) {
 	original := []Message{
 		{ID: 100, Timestamp: 1700000000, Text: "Hello world"},

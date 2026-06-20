@@ -33,13 +33,16 @@ final class ServerController: ObservableObject {
         guard instance == nil else { return }
         do {
             let dir = try Self.dataDir()
+            let saved = UserDefaults.standard.integer(forKey: "tf.lastPort")
             var err: NSError?
-            guard let s = MobileNewServer(dir.path, &err) else {
+            guard let s = MobileNewServer(dir.path, saved, &err) else {
                 lastError = err?.localizedDescription ?? "server start failed"
                 return
             }
             instance = s
-            port = Int(s.port())
+            let actual = Int(s.port())
+            port = actual
+            UserDefaults.standard.set(actual, forKey: "tf.lastPort")
             lastError = nil
         } catch {
             lastError = error.localizedDescription

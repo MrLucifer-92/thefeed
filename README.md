@@ -1,20 +1,41 @@
 # thefeed
 
-DNS-based feed reader for Telegram channels and public X accounts. Designed for environments where only DNS queries work.
+DNS-based feed reader **and lite messenger** for environments where only DNS queries work. Read Telegram channels and public X accounts, and exchange end-to-end-encrypted messages with other users — all over DNS.
 
-[English](README.md) | [فارسی](README-FA.md)
+[English](README.md) | [فارسی](README-FA.md) | [简体中文](README-ZH.md) | [Русский](README-RU.md)
 
 ## Download
 
-- **[Latest release](https://github.com/sartoopjj/thefeed/releases/latest)** — server / client binaries for every platform, plus Android APKs.
-- **Server one-liner** (Linux + systemd):
+- **Latest release** — server / client binaries for every platform, plus Android APKs. Pick the mirror that's reachable for you: [GitLab](https://gitlab.com/sartoopjj/thefeed/-/releases) / [GitHub](https://github.com/sartoopjj/thefeed/releases/latest).
+- **Server one-liner** (Linux + systemd) — pick the mirror that works for you:
   ```bash
+  # GitHub mirror
   sudo bash -c "$(curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh)"
+
+  # GitLab mirror (use this while the GitHub account is unavailable)
+  sudo bash -c "$(curl -Ls https://gitlab.com/sartoopjj/thefeed/-/raw/main/scripts/install.sh)" -- --gitlab
   ```
 - **Android APK** (Android 7.0+): pick `arm64-v8a` for any phone newer than ~2017, `armeabi-v7a` for older 32-bit-only devices.
 - **iOS** (iOS 14+): App Store build planned. Source under [ios/](ios/) — see [iOS development](#ios-development) below.
+- **Windows** (10/11): the `.exe` is **unsigned**, so on first run SmartScreen shows *"Windows protected your PC"* and Defender may quarantine it — a known false positive for DNS-tunneling tools, **not malware**. Click **More info → Run anyway**; if it's removed, restore it from Defender → *Protection history*, and verify the SHA-256 from the release page if unsure. (Code-signing is planned to remove this warning.)
 
 Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
+
+## Screenshots
+
+<table align="center">
+<tr>
+<td align="center"><img src="docs/screenshots/mainfeed.jpg" width="170" alt="Main feed"><br><sub>Main feed</sub></td>
+<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="Messenger"><br><sub>Messenger</sub></td>
+<td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="Reading a post"><br><sub>Reading a post</sub></td>
+<td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="Telemirror"><br><sub>Telemirror</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screenshots/scanner.jpg" width="170" alt="Resolver scanner"><br><sub>Resolver scanner</sub></td>
+<td align="center"><img src="docs/screenshots/resolver-bank.jpg" width="170" alt="Resolver bank"><br><sub>Resolver bank</sub></td>
+<td align="center"><img src="docs/screenshots/settings.jpg" width="170" alt="Settings"><br><sub>Settings</sub></td>
+</tr>
+</table>
 
 ## How It Works
 
@@ -38,6 +59,8 @@ Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
   - **GitHub relay** (fast, default off) uploads bytes to a repo so clients pull via plain HTTPS; intended for files that are too big for DNS
   - Future relays slot in alongside without breaking older clients
 - Random padding on responses (anti-DPI)
+- **Multi-domain** (`--extra-domains` / `THEFEED_EXTRA_DOMAINS`): the server answers feed queries on a main domain plus any number of extra sub-domains, and clients spread block fetches across all of them (load distribution + resilience if one domain is filtered). The main domain stays canonical for relay paths. The import URI carries the extras in the `d=` field.
+- **Messenger** (`--chat-domains` / `THEFEED_CHAT_DOMAINS`): optional store-and-forward messenger between users of the same server, served on dedicated sub-domain(s) — see [Messenger](#messenger)
 - Session persistence — login once, run forever
 - No-Telegram mode (`--no-telegram`) — reads public channels without credentials
 - All data stored in a single directory
@@ -46,9 +69,11 @@ Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
 - Browser-based web UI with RTL/Farsi support (VazirMatn font)
 - Sends encrypted DNS TXT queries via the resolver bank
 - **Resolver Bank**: shared pool of DNS resolvers used across all profiles. Resolvers are added via scanner, import, or manual entry and scored automatically
+- **Built-in starter configs**: the import dialog offers ready-made configs (with a bundled resolver preset) that can be imported in one tap
 - **Resolver scoring**: per-resolver success-rate + latency scoreboard with persistent scores; healthier resolvers are preferred. Low-scoring entries can be pruned
 - **Scatter mode**: fans out the same DNS request to multiple resolvers and uses the fastest response (default: 2 concurrent)
 - **Relay-aware media downloads** — picks the fast relay when the manifest advertises one, retries on transient failure, asks before falling back to the slow DNS path. Hash + size verified on every download
+- **Messenger**: short end-to-end-encrypted messages between users over pure DNS — delivery ticks (✓/✓✓), send/receive progress, quota display, local-only contact book
 - Send messages to channels and private chats (requires server `--allow-manage` + Telegram login)
 - Channel management (add/remove channels remotely via admin commands when `--allow-manage` is enabled)
 - **Per-channel auto-update**: pin specific channels for periodic background refresh, persisted per profile
@@ -84,7 +109,7 @@ Each relay is independent — the same file can be served via DNS *and* GitHub *
 
 Two relays ship today:
 
-- **DNS relay** (slow, default on). Bytes are split into DNS blocks. Survives in censored networks. Default cap: 100 KB.
+- **DNS relay** (slow, off by default). Bytes are split into DNS blocks. Survives in censored networks. Default cap: 100 KB.
 - **GitHub relay** (fast, default off). Bytes are uploaded to a repo and pulled by clients over plain HTTPS. Needs a personal access token with `contents:write`. Files land at `<repo>/<sanitised-domain>/<size>_<crc32>` so multiple deployments can share one repo. Default cap: 15 MB.
 
 Block 0 of every DNS-cached file begins with a 16-byte protocol header — 4 bytes CRC32 of the (decompressed) content, 1 byte version, 1 byte compression, 10 bytes reserved. The remaining bytes are decompressed per the compression byte. Downloads are cached on the client (IndexedDB, 7 days) and on the local thefeed-client server (`<dataDir>/media-cache/`, 7 days). Concurrent downloads are limited and extra clicks are queued.
@@ -105,6 +130,39 @@ Server flags / env vars:
 | `--github-relay-ttl`          | `THEFEED_GITHUB_RELAY_TTL_MIN`       | `600` (min) | orphans pruned next refresh cycle  |
 
 The hourly DNS report includes `totalMediaQueries` and a `mediaCache` block (entries, bytes, hits, misses, evictions).
+
+## Messenger
+
+An optional, standalone store-and-forward messenger between users of the same server (it does not touch Telegram). Enable it by giving the server one or more dedicated sub-domains, distinct from the feed domains:
+
+```bash
+thefeed-server ... --chat-domains c.example.com
+# or: THEFEED_CHAT_DOMAINS=c.example.com
+```
+
+- **End-to-end encrypted**: only the two users can read a message — the server stores opaque blobs and verifies senders without reading anything. Contact names never leave the device.
+- **Identity**: the client generates a recovery code locally; your address is 20 characters derived from it. Share the address out-of-band to be reachable; the same recovery code works on any server.
+- **Fail-closed security**: clients enable chat only when the profile pins the server key (`sk=`) and the server's chat capability data passes signature verification. A signed bit in the feed metadata advertises that a server has chat, so a client *without* the key can tell you "this server has a messenger — re-import the config with its key" instead of failing silently, and clients on chatless servers never waste a probe.
+- **Turn it off without removing domains**: `--chat-enabled=false` (or `THEFEED_CHAT_ENABLED=0`) keeps the domains configured but advertises chat as disabled; clients show "messenger disabled by this server".
+- **Abuse limits**, advertised to clients automatically: `--chat-send-per-hour` (30), `--chat-inbox-cap` (50), `--chat-per-pair-cap` (10), `--chat-max-msg-bytes` (500). Undelivered messages expire after `--chat-ttl-hours` (72).
+- **Accounts are kept by default** (`--chat-account-ttl-days 0`) so reports stay accurate; set a day count to reclaim idle accounts on a busy server. `--chat-max-accounts` (0 = unlimited) caps total accounts.
+- **Durability vs throughput** (`--chat-sync-seconds`, default 1): the message store is flushed to disk every N seconds, so a crash may lose up to ~N seconds of just-received messages (acceptable — chat is end-to-end encrypted and senders resend). Set `0` to fsync on every message for strict durability at lower throughput.
+- In the client UI open **Messenger** from the sidebar. ✓ = stored on the server, ✓✓ = picked up by the recipient. Matching safety emojis on both devices confirm the conversation is secure.
+
+The hourly DNS report includes `totalChatQueries` and a `chat` block (accounts, messages, registrations, sessions).
+
+### Operator report (TUI)
+
+The server appends each hourly report as one JSON line to `<data-dir>/dns_hourly.jsonl` (size-rotated, a few backups kept). The server binary itself renders a terminal dashboard from that file with `--report` — it serves nothing on the network, just reads the data dir:
+
+```bash
+thefeed-server --report                       # reads ./data/dns_hourly.jsonl + ./data/chat.db
+thefeed-server --data-dir /srv/thefeed --report
+thefeed-server --report --report-refresh 5s   # live, redraw every 5s
+thefeed-server --report --report-from 2026-06-10 --report-to "2026-06-11 18:00"   # only this UTC range
+```
+
+It shows total/channel-fetch/metadata/media/chat queries, per-channel averages with bar charts, per-domain totals, a per-report sparkline, queries-per-hour-of-day, and the chat stats (including a live account count from `chat.db`) — the same aggregations as `scripts/thefeed_log_report.py`, drawn in the terminal.
 
 ## Donate:
 
@@ -127,10 +185,16 @@ Thank you for your support ❤️
 
 ## Quick Install (Server)
 
-One-line install (downloads latest release from GitHub)
+The installer can fetch binaries from either the GitHub or the GitLab mirror.
+By default it auto-detects (tries GitHub first, falls back to GitLab); pass
+`--gitlab` to force GitLab when the GitHub account is unavailable.
 
 ```bash
+# GitHub mirror
 sudo bash -c "$(curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh)"
+
+# GitLab mirror
+sudo bash -c "$(curl -Ls https://gitlab.com/sartoopjj/thefeed/-/raw/main/scripts/install.sh)" -- --gitlab
 ```
 
 Or manually:
@@ -138,7 +202,9 @@ Or manually:
 ```bash
 # On your server (Linux with systemd)
 curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh -o install.sh
-sudo bash install.sh
+sudo bash install.sh                # auto: GitHub, then GitLab fallback
+sudo bash install.sh --gitlab       # force GitLab mirror
+sudo bash install.sh --source github
 ```
 
 The script will:
@@ -169,6 +235,7 @@ Short forms: `-v <tag>` is the same as `--version <tag>`. The legacy positional 
 `sudo bash install.sh v1.0.0` still works.
 
 Re-login: `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --login`
+Show config (the import URI — domain, key, `sk=` server key, bootstrap resolvers): `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --config`
 Uninstall: `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --uninstall`
 
 
@@ -422,6 +489,26 @@ All configuration, cache, and data files are stored in the data directory.
 
 The **concurrent requests (scatter)** setting and all other profile options (resolvers, rate limit, query mode, timeout) are configured through the web UI profile editor, not CLI flags.
 
+#### macOS (.app / .dmg)
+
+Each release ships a universal `thefeed-macos-<version>.dmg` that bundles the client into a drag-install `Thefeed.app`. Same binary works on Intel and Apple Silicon. The app starts the local web UI and opens your browser; data is persisted under `~/Library/Application Support/Thefeed`. Once running it appears as a "Thefeed" item in the menu bar (top-right of the screen) with **Open Thefeed** and **Quit Thefeed** entries — that's the clean way to stop the server. The child process's logs go to `~/Library/Application Support/Thefeed/launcher.log` for debugging.
+
+The DMG is unsigned, so the first launch needs one of:
+
+```bash
+# A) right-click → Open in Finder once (Gatekeeper prompt clears the
+#    quarantine flag for future launches)
+# B) clear it from the terminal
+xattr -dr com.apple.quarantine /Applications/Thefeed.app
+```
+
+To build locally on macOS:
+
+```bash
+make mac-dmg
+# → build/Thefeed.app  +  build/thefeed-macos-<version>.dmg
+```
+
 #### Android (Termux)
 
 ```bash
@@ -534,7 +621,7 @@ make clean       # Remove build artifacts
 
 Wraps the Go client as a gomobile-bound xcframework consumed by a SwiftUI app under `ios/`. Server runs in-process on `127.0.0.1:<random-port>`; foreground only (iOS does not allow long-lived background servers).
 
-Prereqs on macOS: Xcode 15+, Go 1.22+, gomobile.
+Prereqs on macOS: Xcode 15+, Go 1.26+, gomobile.
 
 ```
 go install golang.org/x/mobile/cmd/gomobile@latest

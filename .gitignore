@@ -41,5 +41,3 @@ ios/Thefeed.xcodeproj/project.xcworkspace/xcuserdata
 
 # Stale backups (sed/in-place edits)
 *.bak
-internal/web/static/iran-lion-sun.svg
-internal/web/static/iran-lion-sun-dark.svg

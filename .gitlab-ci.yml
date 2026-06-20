@@ -1,0 +1,631 @@
+# thefeed — GitLab CI pipeline (mirrors .github/workflows/build.yml)
+#
+# Triggers ONLY on annotated tags v* — branches and MRs do not run the
+# pipeline. Release-candidate tags (-rc) are excluded here and built on
+# GitHub only. A pre-release is detected by a hyphen in the tag (e.g.
+# v1.0.0-beta2), matching the GitHub workflow's
+# `prerelease: contains(github.ref_name, '-')` behaviour. The Release on
+# GitLab gets its name prefixed with "Pre-release: " and the description
+# called out so users can tell them apart.
+#
+# iOS / Catalyst note (read me): GitLab.com SaaS does not ship free macOS
+# runners; the `ios-ipa` job is wired up but tagged `macos` so it only runs
+# when a self-hosted (or paid SaaS) macOS runner is registered to the
+# project. Otherwise it is skipped — the rest of the pipeline still ships.
+#
+# Required CI/CD variables (Settings → CI/CD → Variables) for signed APK:
+#   KEYSTORE_BASE64   base64-encoded keystore.jks (File-type variable also OK)
+#   KEYSTORE_PASSWORD
+#   KEY_ALIAS
+#   KEY_PASSWORD
+# All four MUST be marked Protected AND v* tags MUST be listed under
+# Settings → Repository → Protected tags. Otherwise GitLab refuses to
+# inject Protected variables into the tag pipeline, KEYSTORE_BASE64
+# arrives empty, and the android-apk job hard-fails (intentional —
+# debug-signed APKs are never shipped because the debug key is well-known
+# and signed-update installs would break for existing users).
+#
+# Caching strategy (free-plan friendly):
+#   * Go module cache  — keyed by go.sum, shared across every Go job.
+#   * Go build cache   — keyed by GOOS/GOARCH so platforms don't fight.
+#   * Android SDK+NDK  — pulled into $CI_PROJECT_DIR/.android-sdk and cached
+#                        across runs. ~1.5GB; biggest savings.
+#   * Gradle cache     — keeps Android dependency downloads between runs.
+
+stages:
+  - test
+  - build
+  - package
+  - release
+
+variables:
+  GIT_DEPTH: "0"            # release-cli needs the full history for tag info
+  GIT_SUBMODULE_STRATEGY: none
+  GO_VERSION: "1.26"
+  # Cache paths must live under $CI_PROJECT_DIR for GitLab to pack them.
+  GOPATH: "$CI_PROJECT_DIR/.go"
+  GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+  GOMODCACHE: "$CI_PROJECT_DIR/.cache/go-mod"
+
+# Tag-only pipeline. Pushing to a branch or opening an MR does not trigger
+# a build — the only event that matters is `git push --tags`.
+#
+# Release-candidate tags (e.g. v1.0.0-rc1) are intentionally skipped on
+# GitLab: RC builds are produced on GitHub only. Final releases and any
+# non-rc pre-releases (e.g. -beta) still run here.
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/ && $CI_COMMIT_TAG !~ /-rc/'
+
+# ---------- shared bases ----------
+
+.go_base:
+  image: golang:${GO_VERSION}
+  # Two cache slots: a shared module cache (cheap, same across everything)
+  # and a per-job build cache (otherwise GOOS/GOARCH variants invalidate
+  # each other). The build cache uses $CI_JOB_NAME_SLUG so each matrix
+  # variant gets its own slot.
+  cache:
+    - key:
+        files: [go.sum]
+        prefix: gomod
+      paths:
+        - .cache/go-mod
+      policy: pull-push
+    - key: "gobuild-$CI_JOB_NAME_SLUG"
+      paths:
+        - .cache/go-build
+      policy: pull-push
+
+# ---------- test ----------
+
+test:
+  extends: .go_base
+  stage: test
+  script:
+    - go vet ./... &
+    - go test -race -count=1 ./...
+    - wait
+
+# ---------- non-Android cross-build matrix ----------
+#
+# Mirrors the GitHub Actions matrix exactly. Android is handled separately
+# because it needs CGO + the NDK clang wrapper, and the iOS build needs a
+# macOS runner.
+
+build:
+  extends: .go_base
+  stage: build
+  needs: ["test"]
+  variables:
+    CGO_ENABLED: "0"
+  parallel:
+    matrix:
+      - GOOS: linux
+        GOARCH: amd64
+      - GOOS: linux
+        GOARCH: arm64
+      - GOOS: darwin
+        GOARCH: amd64
+      - GOOS: darwin
+        GOARCH: arm64
+      - GOOS: freebsd
+        GOARCH: amd64
+      - GOOS: freebsd
+        GOARCH: arm64
+      - GOOS: windows
+        GOARCH: amd64
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq upx-ucl
+  script:
+    - mkdir -p build
+    - VERSION="${CI_COMMIT_TAG:-dev}"
+    - COMMIT=$(git rev-parse --short HEAD)
+    - DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - ext=""
+    - if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+    # Embed PE version info so heuristic AV stops flagging the .exe.
+    # go run is wrapped in a subshell that unsets GOOS/GOARCH so the
+    # tool itself is built for the host (Linux), not cross-compiled
+    # to Windows along with the target binary.
+    - |
+      if [ "$GOOS" = "windows" ]; then
+        GVI="github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.7.0"
+        VER_NUM="${VERSION#v}"
+        NUM_ONLY=$(echo "$VER_NUM" | grep -oE '^[0-9]+(\.[0-9]+)*' || echo "0.0.0")
+        V_MAJ=$(echo "$NUM_ONLY" | awk -F. '{print $1+0}')
+        V_MIN=$(echo "$NUM_ONLY" | awk -F. '{print $2+0}')
+        V_PATCH=$(echo "$NUM_ONLY" | awk -F. '{print $3+0}')
+        for d in cmd/server cmd/client; do
+          (
+            unset GOOS GOARCH
+            cd "$d" && go run "$GVI" \
+              -ver-major="$V_MAJ" -ver-minor="$V_MIN" -ver-patch="$V_PATCH" \
+              -product-version="$VER_NUM" -file-version="$VER_NUM" \
+              -o resource_windows_amd64.syso versioninfo.json
+          )
+        done
+      fi
+    - SERVER_LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
+    - ASSET_TEMPLATE="thefeed-client-{V}-${GOOS}-${GOARCH}${ext}"
+    - CLIENT_LDFLAGS="${SERVER_LDFLAGS} -X github.com/sartoopjj/thefeed/internal/version.AssetTemplate=${ASSET_TEMPLATE}"
+    - go build -trimpath -ldflags="${SERVER_LDFLAGS}" -o "build/thefeed-server-${GOOS}-${GOARCH}${ext}" ./cmd/server
+    - go build -trimpath -ldflags="${CLIENT_LDFLAGS}" -o "build/thefeed-client-${VERSION}-${GOOS}-${GOARCH}${ext}" ./cmd/client
+    # UPX on Linux only. Windows is excluded — UPX-packed PE binaries
+    # universally trigger AV heuristics (Defender Wacatac, Kaspersky
+    # Boogr.gsh, ClamAV) and users see the download flagged as malware.
+    # Plain Go binaries on Windows still trip "untrusted publisher"
+    # warnings but not malware detection.
+    - |
+      if [ "$GOOS" = "linux" ]; then
+        find build -maxdepth 1 -type f -print0 \
+          | xargs -0 -n1 -P "$(nproc)" -I{} sh -c 'upx --best --lzma "$1" || true' _ {}
+      fi
+  artifacts:
+    name: "binaries-$GOOS-$GOARCH"
+    paths:
+      - build/
+    expire_in: 1 week
+
+# ---------- Android Go client builds ----------
+#
+# Two separate jobs (instead of a parallel matrix) because each one needs a
+# different NDK clang wrapper exported into CC.
+
+.android-go:
+  stage: build
+  needs: ["test"]
+  image: golang:${GO_VERSION}
+  # Cache slots:
+  #  1. Go module cache, shared across all Go jobs.
+  #  2. Go build cache, per-job (android-arm vs android-arm64 differ).
+  #  3. Android NDK under .android-ndk/, keyed by NDK release tag.
+  #     Bumping ANDROID_NDK_RELEASE invalidates the cache automatically.
+  cache:
+    - key:
+        files: [go.sum]
+        prefix: gomod
+      paths: [.cache/go-mod]
+      policy: pull-push
+    - key: "gobuild-$CI_JOB_NAME_SLUG"
+      paths: [.cache/go-build]
+      policy: pull-push
+    - key: "android-ndk-${ANDROID_NDK_RELEASE}"
+      paths: [.android-ndk/]
+      policy: pull-push
+  variables:
+    CGO_ENABLED: "1"
+    # NDK r28b. r28 made -z max-page-size=16384 the default linker setting,
+    # which is required for the binary to load on Android 16 devices that
+    # use 16 KB memory pages. Earlier NDKs (r26d, r27*) produce 4 KB-aligned
+    # ELFs that the kernel refuses to mmap on 16 KB-page devices, surfacing
+    # to users as a "this app isn't supported on the latest Android version"
+    # install/launch error.
+    #
+    # We also pass an explicit -extldflags below for belt-and-suspenders so
+    # the alignment is correct even if the NDK is downgraded in future.
+    ANDROID_NDK_RELEASE: "r28b"
+    ANDROID_NDK_HOME: "$CI_PROJECT_DIR/.android-ndk"
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl unzip
+    - |
+      CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+      if [ ! -x "$CLANG" ]; then
+        echo "Downloading NDK ${ANDROID_NDK_RELEASE} (cache miss)…"
+        rm -rf "$ANDROID_NDK_HOME"
+        mkdir -p "$(dirname "$ANDROID_NDK_HOME")"
+        curl -sSL -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_RELEASE}-linux.zip"
+        unzip -q /tmp/ndk.zip -d "$(dirname "$ANDROID_NDK_HOME")"
+        mv "$(dirname "$ANDROID_NDK_HOME")/android-ndk-${ANDROID_NDK_RELEASE}" "$ANDROID_NDK_HOME"
+        rm /tmp/ndk.zip
+      else
+        echo "Reusing cached NDK ${ANDROID_NDK_RELEASE}."
+      fi
+  script:
+    - mkdir -p build
+    - VERSION="${CI_COMMIT_TAG:-dev}"
+    - COMMIT=$(git rev-parse --short HEAD)
+    - DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - ASSET_TEMPLATE="thefeed-client-android-${GOARCH}"
+    # -extldflags forwards a flag to the NDK clang/lld so the resulting ELF
+    # is 16 KB-aligned, which Android 16 devices require to mmap and exec
+    # the binary. NDK r28+ defaults to this, but the explicit flag keeps
+    # working if the NDK is downgraded.
+    - LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -X github.com/sartoopjj/thefeed/internal/version.AssetTemplate=${ASSET_TEMPLATE} -extldflags=-Wl,-z,max-page-size=16384"
+    - |
+      case "$GOARCH" in
+        arm64) export CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" ;;
+        arm)   export CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang" ;;
+      esac
+    - test -x "$CC" || { echo "NDK clang not found at $CC"; exit 1; }
+    - GOOS=android GOARCH=$GOARCH GOARM=${GOARM:-} go build -trimpath -buildvcs=false -buildmode=pie -ldflags="${LDFLAGS}" -o "build/thefeed-client-android-${GOARCH}" ./cmd/client
+  artifacts:
+    paths:
+      - build/
+    expire_in: 1 week
+
+build:android-arm64:
+  extends: .android-go
+  variables:
+    GOARCH: arm64
+
+build:android-arm:
+  extends: .android-go
+  variables:
+    GOARCH: arm
+    GOARM: "7"
+
+# ---------- Android APK assembly ----------
+
+android-apk:
+  stage: package
+  # The APK no longer bundles a standalone client binary — the Go HTTP
+  # server is compiled into a gomobile-generated AAR loaded via JNI.
+  # build:android-arm{,64} still run for the Termux/CLI release assets
+  # but are not on the APK's critical path.
+  needs: ["test"]
+  image: eclipse-temurin:17-jdk
+  variables:
+    GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+    # Bump these when the project's compileSdk / build-tools change — the
+    # cache key below is derived from them so any bump invalidates the
+    # cached SDK and a fresh one is installed.
+    ANDROID_PLATFORM: "35"
+    ANDROID_BUILD_TOOLS: "35.0.0"
+    ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
+    ANDROID_HOME: "$CI_PROJECT_DIR/.android-sdk"
+    # NDK r28b: 16 KB page alignment is the default linker setting,
+    # matching what build:android-arm{,64} use. gomobile bind picks
+    # this NDK up via ANDROID_NDK_HOME.
+    ANDROID_NDK_RELEASE: "r28b"
+    ANDROID_NDK_HOME: "$CI_PROJECT_DIR/.android-ndk"
+    GO_VERSION: "1.26.0"
+  cache:
+    - key: "gradle"
+      paths:
+        - .gradle/caches
+        - .gradle/wrapper
+      policy: pull-push
+    - key: "android-sdk-p${ANDROID_PLATFORM}-bt${ANDROID_BUILD_TOOLS}"
+      paths: [.android-sdk/]
+      policy: pull-push
+    - key: "android-ndk-${ANDROID_NDK_RELEASE}"
+      paths: [.android-ndk/]
+      policy: pull-push
+    - key:
+        files: [go.sum]
+        prefix: gomod-androidapk
+      paths: [.cache/go-mod]
+      policy: pull-push
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl unzip git
+    # Install Android cmdline-tools + SDK platform + build-tools if missing.
+    # sdkmanager is Java-based and this image already ships Temurin 17, so
+    # no extra JDK install is needed.
+    - |
+      if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+        echo "Installing Android cmdline-tools (cache miss)…"
+        mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+        curl -sSL -o /tmp/clt.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+        unzip -q /tmp/clt.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+        mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+        rm /tmp/clt.zip
+      else
+        echo "Reusing cached Android cmdline-tools."
+      fi
+    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    - |
+      if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-${ANDROID_PLATFORM}" ] \
+         || [ ! -d "$ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}" ]; then
+        echo "Installing SDK platform-${ANDROID_PLATFORM} + build-tools ${ANDROID_BUILD_TOOLS} (cache miss)…"
+        mkdir -p "$ANDROID_SDK_ROOT/licenses"
+        printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
+        printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
+        sdkmanager "platform-tools" "platforms;android-${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"
+      else
+        echo "Reusing cached SDK platform-${ANDROID_PLATFORM} + build-tools ${ANDROID_BUILD_TOOLS}."
+      fi
+    # NDK r28b for cgo: gomobile bind drives the NDK clang for the Go
+    # compilation step. Cached across runs.
+    - |
+      CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+      if [ ! -x "$CLANG" ]; then
+        echo "Downloading NDK ${ANDROID_NDK_RELEASE} (cache miss)…"
+        rm -rf "$ANDROID_NDK_HOME"
+        mkdir -p "$(dirname "$ANDROID_NDK_HOME")"
+        curl -sSL -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_RELEASE}-linux.zip"
+        unzip -q /tmp/ndk.zip -d "$(dirname "$ANDROID_NDK_HOME")"
+        mv "$(dirname "$ANDROID_NDK_HOME")/android-ndk-${ANDROID_NDK_RELEASE}" "$ANDROID_NDK_HOME"
+        rm /tmp/ndk.zip
+      else
+        echo "Reusing cached NDK ${ANDROID_NDK_RELEASE}."
+      fi
+    # Install a pinned Go toolchain — eclipse-temurin doesn't ship Go.
+    - |
+      if [ ! -x /usr/local/go/bin/go ]; then
+        echo "Installing Go ${GO_VERSION}…"
+        curl -sSL -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+        tar -C /usr/local -xzf /tmp/go.tar.gz
+        rm /tmp/go.tar.gz
+      fi
+    - export PATH="/usr/local/go/bin:$CI_PROJECT_DIR/.gobin:$PATH"
+    - export GOPATH="$CI_PROJECT_DIR/.gopath"
+    - export GOMODCACHE="$CI_PROJECT_DIR/.cache/go-mod"
+    - export GOBIN="$CI_PROJECT_DIR/.gobin"
+    - mkdir -p "$GOBIN" "$GOPATH"
+    - go install golang.org/x/mobile/cmd/gomobile@latest
+    - go install golang.org/x/mobile/cmd/gobind@latest
+    - gomobile init
+  script:
+    # Build the gomobile AAR (in-process Go HTTP server, JNI-loaded).
+    # Both ABIs are produced in one bind invocation; the -extldflags is
+    # belt-and-suspenders against future NDK downgrades.
+    - VERSION="${CI_COMMIT_TAG:-dev}"
+    - COMMIT=$(git rev-parse --short HEAD)
+    - DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # -s -w drops the symbol table + DWARF (saves ~12 MB per ABI).
+    # 16 KB page alignment is required on Android 15+ devices
+    # configured for 16 KB pages — NDK r28+ defaults to this anyway,
+    # but the explicit flag is belt-and-suspenders.
+    - LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -extldflags=-Wl,-z,max-page-size=16384"
+    - mkdir -p android/app/libs
+    - gomobile bind -target=android/arm,android/arm64,android/386,android/amd64 -androidapi 24 -ldflags="${LDFLAGS}" -o android/app/libs/mobile.aar ./mobile
+    # Decode signing keystore. KEYSTORE_BASE64 can be a regular variable
+    # (base64-encoded) or a File-type variable containing the raw bytes.
+    # Required for any tag pipeline — we never ship debug-signed APKs
+    # because the debug key is well-known and updates would fail to
+    # install over a properly-signed previous release.
+    - |
+      if [ -z "$KEYSTORE_BASE64" ]; then
+        echo "ERROR: KEYSTORE_BASE64 is empty."
+        echo "  Make sure 'v*' tags are listed under Settings → Repository →"
+        echo "  Protected tags, so protected CI/CD variables flow into the"
+        echo "  tag pipeline. Required variables: KEYSTORE_BASE64,"
+        echo "  KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD."
+        exit 1
+      fi
+      if [ -f "$KEYSTORE_BASE64" ]; then
+        cp "$KEYSTORE_BASE64" android/app/keystore.jks
+      else
+        echo "$KEYSTORE_BASE64" | base64 -d > android/app/keystore.jks
+      fi
+      echo "Keystore decoded"
+    - cd android
+    - VERSION="${CI_COMMIT_TAG:-dev}"
+    - |
+      if [ ! -x ./gradlew ]; then
+        curl -sSL -o /tmp/g.zip https://services.gradle.org/distributions/gradle-8.10.2-bin.zip
+        unzip -q /tmp/g.zip -d /opt
+        export PATH="/opt/gradle-8.10.2/bin:$PATH"
+        gradle wrapper --gradle-version 8.10.2
+      fi
+    # We only reach this point with app/keystore.jks present — the
+    # KEYSTORE_BASE64 check above hard-fails otherwise. So always do a
+    # release build with the real signing key.
+    - BT=release
+    - TASK=assembleRelease
+    # Pass 1 — per-ABI split APKs (arm, arm64, x86, x86_64).
+    - ./gradlew --no-daemon --build-cache $TASK
+    - APK_DIR=app/build/outputs/apk/$BT
+    - mkdir -p ../artifacts
+    - cp "$APK_DIR"/app-arm64-v8a-${BT}.apk   "../artifacts/thefeed-android-${VERSION}-arm64-v8a.apk"
+    - cp "$APK_DIR"/app-armeabi-v7a-${BT}.apk "../artifacts/thefeed-android-${VERSION}-armeabi-v7a.apk"
+    - cp "$APK_DIR"/app-x86-${BT}.apk         "../artifacts/thefeed-android-${VERSION}-x86.apk"
+    - cp "$APK_DIR"/app-x86_64-${BT}.apk      "../artifacts/thefeed-android-${VERSION}-x86_64.apk"
+    # Pass 2 — universal APK (arm + arm64 + x86_64, x86 stripped).
+    - ./gradlew --no-daemon --build-cache -PuniversalBuild=true $TASK
+    - cp "$APK_DIR"/app-${BT}.apk             "../artifacts/thefeed-android-${VERSION}-universal.apk"
+  artifacts:
+    name: "thefeed-android-apk"
+    paths:
+      - artifacts/thefeed-android-*-arm64-v8a.apk
+      - artifacts/thefeed-android-*-armeabi-v7a.apk
+      - artifacts/thefeed-android-*-x86.apk
+      - artifacts/thefeed-android-*-x86_64.apk
+      - artifacts/thefeed-android-*-universal.apk
+    expire_in: 1 week
+
+# ---------- GitLab Pages ----------
+#
+# Publishes docs/ (currently privacy-policy.html + a redirect index) on
+# every tag pipeline. Site URL: https://sartoopjj.gitlab.io/thefeed/
+#
+# The job name MUST be exactly `pages` and it MUST upload an artifact
+# named `public/` — that's GitLab's contract for the Pages deployer.
+
+pages:
+  stage: package
+  image: alpine:latest
+  needs: []
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/'
+  script:
+    - mkdir -p public
+    - cp -r docs/. public/
+    - ls -la public
+  artifacts:
+    paths:
+      - public
+    expire_in: 1 week
+
+# ---------- iOS / Catalyst (opt-in, macOS runner only) ----------
+#
+# Disabled by default so it never appears in tag pipelines that don't have
+# a macOS runner — otherwise a pending "manual" job would block the
+# release stage's needs:optional resolution and the release would never
+# start. Enable iOS builds by setting CI/CD variable BUILD_IOS=1 (or
+# passing it when running the pipeline manually). When BUILD_IOS=1 AND a
+# runner tagged `macos` exists, this job runs automatically; otherwise
+# release goes through without an IPA.
+
+ios-ipa:
+  stage: build
+  needs: ["test"]
+  tags: ["macos"]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/ && $BUILD_IOS == "1"'
+      allow_failure: true
+  script:
+    - sudo xcode-select -s /Applications/Xcode.app
+    - go install golang.org/x/mobile/cmd/gomobile@latest
+    - go install golang.org/x/mobile/cmd/gobind@latest
+    - gomobile init
+    - go get golang.org/x/mobile/bind golang.org/x/mobile/bind/objc
+    - go mod tidy
+    - VERSION="${CI_COMMIT_TAG:-dev}"
+    - COMMIT=$(git rev-parse --short HEAD)
+    - DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    - LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
+    - gomobile bind -iosversion=14.0 -target=ios,iossimulator -ldflags="${LDFLAGS}" -o ios/Mobile.xcframework ./mobile
+    - MARKETING_VERSION="${VERSION#v}"
+    - BUILD_NUMBER=$(git rev-list --count HEAD)
+    - |
+      xcodebuild \
+        -project ios/Thefeed.xcodeproj \
+        -scheme Thefeed \
+        -configuration Release \
+        -destination 'generic/platform=iOS' \
+        -archivePath build/Thefeed.xcarchive \
+        archive \
+        MARKETING_VERSION="${MARKETING_VERSION}" \
+        CURRENT_PROJECT_VERSION="${BUILD_NUMBER}" \
+        CODE_SIGN_IDENTITY="" \
+        CODE_SIGNING_REQUIRED=NO \
+        CODE_SIGNING_ALLOWED=NO \
+        DEVELOPMENT_TEAM=""
+    - mkdir -p build/Payload artifacts
+    - cp -r build/Thefeed.xcarchive/Products/Applications/Thefeed.app build/Payload/
+    - (cd build && zip -qry "../artifacts/thefeed-ios-${VERSION}-unsigned.ipa" Payload)
+    - ls -lh artifacts/*.ipa
+  artifacts:
+    name: "thefeed-ios-ipa"
+    paths:
+      - artifacts/thefeed-ios-*-unsigned.ipa
+    expire_in: 1 week
+
+# ---------- Release ----------
+#
+# GitLab does not have a one-shot "make-a-release-with-files" action like
+# softprops/action-gh-release. The standard flow is:
+#   1. Upload each binary to the project's Generic Package Registry under
+#      packages/generic/thefeed/<tag>/<filename> (job-token auth).
+#   2. Create the GitLab Release with `release-cli`, attaching one asset
+#      link per uploaded file. Those links surface on the Releases page
+#      under /-/releases/<tag>.
+#
+# The user-friendly download URL becomes:
+#   https://gitlab.com/sartoopjj/thefeed/-/releases/<tag>/downloads/<file>
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: "build"
+      artifacts: true
+    - job: "build:android-arm64"
+      artifacts: true
+    - job: "build:android-arm"
+      artifacts: true
+    - job: "android-apk"
+      artifacts: true
+    # iOS is manual + macOS-only; pull its artifact when it ran, skip otherwise.
+    - job: "ios-ipa"
+      artifacts: true
+      optional: true
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/'
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - mkdir -p assets
+    # Pull binaries from the per-platform `build/` dirs the matrix produced
+    # and the APKs from `artifacts/` (the android-apk job's output).
+    - find build -maxdepth 1 -type f -exec cp {} assets/ \;
+    - find artifacts -maxdepth 1 -type f -exec cp {} assets/ \;
+    - VERSION="${CI_COMMIT_TAG}"
+    - PROJECT_URL_ENC=$(echo -n "${CI_PROJECT_PATH}" | sed 's|/|%2F|g')
+    - PKG_BASE="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/thefeed/${VERSION}"
+    - DL_BASE="${CI_PROJECT_URL}/-/releases/${VERSION}/downloads"
+    # Pre-release detection — same convention as GitHub Actions
+    # (prerelease = tag contains a hyphen, e.g. v1.0.0-rc1, v1.0.0-beta2).
+    - |
+      if [[ "$VERSION" == *-* ]]; then
+        IS_PRE=1
+        RELEASE_NAME="Pre-release ${VERSION}"
+        RELEASE_BANNER="> **⚠️ Pre-release** — this build is a beta/rc. Try it, but use a stable tag for production."
+      else
+        IS_PRE=0
+        RELEASE_NAME="Release ${VERSION}"
+        RELEASE_BANNER=""
+      fi
+    - echo "VERSION=$VERSION IS_PRE=$IS_PRE"
+    # Upload every asset to the generic registry and build the asset-links
+    # array as we go.
+    #
+    # Each --assets-link JSON sets:
+    #   url       → the actual Generic Package Registry download URL.
+    #   filepath  → makes the friendly /-/releases/<tag>/downloads/<name>
+    #               shortcut work; GitLab redirects it to `url`.
+    # Without `filepath` the /downloads/<name> URL 404s — the release page
+    # would only show the long /api/v4/... URL in the Assets section.
+    - LINKS=""
+    - rm -f checksums.txt && touch checksums.txt
+    - |
+      for f in assets/*; do
+        name=$(basename "$f")
+        sha=$(sha256sum "$f" | awk '{print $1}')
+        echo "Uploading $name (sha256=$sha)..."
+        curl --fail --silent --show-error \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "$f" \
+          "${PKG_BASE}/${name}"
+        LINKS="${LINKS} --assets-link {\"name\":\"${name}\",\"url\":\"${PKG_BASE}/${name}\",\"filepath\":\"/${name}\",\"link_type\":\"package\"}"
+        # Same format as `sha256sum -c` expects (HASH<two spaces>NAME)
+        # so users can verify with: sha256sum -c sha256sums.txt
+        printf '%s  %s\n' "$sha" "$name" >> checksums.txt
+      done
+    # Build the release body — mirrors the Downloads table the GitHub
+    # workflow emits, but pointing at GitLab's release-download URLs.
+    - |
+      cat > release_notes.md <<EOF
+      ${RELEASE_BANNER}
+
+      ## Downloads
+
+      | Platform | Architecture | Download |
+      |----------|-------------|----------|
+      | Linux | amd64 | [server-سرور](${DL_BASE}/thefeed-server-linux-amd64) / [client-کلاینت](${DL_BASE}/thefeed-client-${VERSION}-linux-amd64) |
+      | Linux | arm64 | [server-سرور](${DL_BASE}/thefeed-server-linux-arm64) / [client-کلاینت](${DL_BASE}/thefeed-client-${VERSION}-linux-arm64) |
+      | macOS | amd64 (Intel) | [server-سرور](${DL_BASE}/thefeed-server-darwin-amd64) / [client-کلاینت](${DL_BASE}/thefeed-client-${VERSION}-darwin-amd64) |
+      | macOS | arm64 (Apple Silicon) | [server-سرور](${DL_BASE}/thefeed-server-darwin-arm64) / [client-کلاینت](${DL_BASE}/thefeed-client-${VERSION}-darwin-arm64) |
+      | FreeBSD | amd64 | [server-سرور](${DL_BASE}/thefeed-server-freebsd-amd64) / [client-کلاینت](${DL_BASE}/thefeed-client-${VERSION}-freebsd-amd64) |
+      | FreeBSD | arm64 | [server-سرور](${DL_BASE}/thefeed-server-freebsd-arm64) / [client-کلاینت](${DL_BASE}/thefeed-client-${VERSION}-freebsd-arm64) |
+      | Windows | amd64 | [server-سرور](${DL_BASE}/thefeed-server-windows-amd64.exe) / [client-کلاینت](${DL_BASE}/thefeed-client-${VERSION}-windows-amd64.exe) |
+      | Android | universal (all ABIs, **recommended**) | [thefeed-android-${VERSION}-universal.apk - اندروید (یونیورسال، توصیه‌شده)](${DL_BASE}/thefeed-android-${VERSION}-universal.apk) |
+      | Android | arm64-v8a (modern phones, smaller) | [thefeed-android-${VERSION}-arm64-v8a.apk - اندروید (گوشی‌های جدید)](${DL_BASE}/thefeed-android-${VERSION}-arm64-v8a.apk) |
+      | Android | armeabi-v7a (older 32-bit phones) | [thefeed-android-${VERSION}-armeabi-v7a.apk - اندروید (دستگاه‌های قدیمی‌تر)](${DL_BASE}/thefeed-android-${VERSION}-armeabi-v7a.apk) |
+      | Android | x86_64 (Chromebooks, emulators, WSA) | [thefeed-android-${VERSION}-x86_64.apk - اندروید (کروم‌بوک، شبیه‌ساز، WSA)](${DL_BASE}/thefeed-android-${VERSION}-x86_64.apk) |
+      | Android | x86 (32-bit Intel, niche) | [thefeed-android-${VERSION}-x86.apk - اندروید (اینتل ۳۲ بیت، نادر)](${DL_BASE}/thefeed-android-${VERSION}-x86.apk) |
+      | iOS / iPadOS | TestFlight (**easiest — installs in one tap**) | [Join the TestFlight beta - نصب آسان روی آیفون](https://testflight.apple.com/join/J6bfxDdZ) |
+      | iOS (unsigned) | universal \`.ipa\` | [thefeed-ios-${VERSION}-unsigned.ipa](${DL_BASE}/thefeed-ios-${VERSION}-unsigned.ipa) |
+
+      **iOS / iPadOS (preview, iOS 14+):** the easiest install is the public [TestFlight beta](https://testflight.apple.com/join/J6bfxDdZ) — one tap, no computer needed. Otherwise the \`.ipa\` below is unsigned: re-sign it with your own Apple ID and provisioning profile (AltStore, Sideloadly, or \`xcrun altool\`). The \`.ipa\` will not install directly from a download.
+
+      **Windows (10/11):** the \`.exe\` is **unsigned**, so SmartScreen shows *"Windows protected your PC"* and Defender may flag it as a false positive — DNS-tunneling tools commonly trip AV heuristics; **this is not malware**. Click **More info → Run anyway**, and if it's quarantined restore it from Defender → *Protection history*. Verify the SHA-256 below if unsure. — این هشدار طبیعی است (فایل امضای دیجیتال ندارد)؛ روی **More info → Run anyway** بزنید.
+
+      ## SHA-256 checksums
+
+      Verify a download with: \`sha256sum -c sha256sums.txt\` (or \`shasum -a 256 -c sha256sums.txt\` on macOS).
+
+      \`\`\`
+      $(cat checksums.txt)
+      \`\`\`
+
+      Mirror: also published on GitHub at https://github.com/sartoopjj/thefeed/releases/tag/${VERSION} when the GitHub account is available.
+      EOF
+    - |
+      release-cli create \
+        --name "${RELEASE_NAME}" \
+        --tag-name "${VERSION}" \
+        --description "$(cat release_notes.md)" \
+        ${LINKS}

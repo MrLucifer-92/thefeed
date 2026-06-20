@@ -1,0 +1,175 @@
+    /* ===== MOBILE ===== */
+    .header-kebab {
+      position: relative;
+      display: none
+    }
+
+    .header-kebab-menu {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 4px);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, .2);
+      min-width: 150px;
+      z-index: 100;
+      display: none;
+      flex-direction: column;
+      overflow: hidden
+    }
+
+    .header-kebab-menu.open {
+      display: flex
+    }
+
+    .header-kebab-menu button {
+      width: 100%;
+      padding: 11px 16px;
+      background: none;
+      border: none;
+      color: var(--text);
+      font-size: var(--text-sm);
+      font-family: inherit;
+      cursor: pointer;
+      text-align: left
+    }
+
+    .header-kebab-menu button:hover {
+      background: var(--hover)
+    }
+
+    @media(max-width:768px) {
+
+      /* On mobile, the body's safe-area padding covers iOS notch/home bar.
+         Inside, the app fills the remaining space. */
+      .app {
+        position: relative;
+        overflow: hidden;
+        height: 100%
+      }
+
+      /* Instant pane swap, NO slide transition. A transform transition could be
+         interrupted (open then immediate Back, or a programmatic open) and
+         freeze halfway on the Android WebView compositor — the recurring "stuck
+         at ~50% channel / 50% list" hang. With no animation there is no halfway
+         state to freeze: the panes switch instantly. */
+      .sidebar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        width: 100%;
+        z-index: 2;
+        transform: translateX(0)
+      }
+
+      .chat-area {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1;
+        transform: translateX(100%)
+      }
+
+      .app.chat-open .sidebar {
+        transform: translateX(-100%)
+      }
+
+      .app.chat-open .chat-area {
+        transform: translateX(0)
+      }
+
+      .back-btn {
+        display: flex
+      }
+
+      .header-search-btn,
+      .header-export-btn {
+        display: none
+      }
+
+      .header-kebab {
+        display: flex
+      }
+
+      .msg {
+        max-width: 90%
+      }
+
+      /* Modals on mobile become bottom sheets — make sure they reach the
+         visible bottom edge and aren't hidden behind the browser nav bar
+         or iOS home indicator. */
+      .modal-overlay {
+        height: 100dvh
+      }
+
+      .modal {
+        width: 100%;
+        max-width: 100%;
+        max-height: 92dvh;
+        border-radius: 20px 20px 0 0;
+        border-left: none;
+        border-right: none;
+        border-bottom: none;
+        margin-top: auto;
+        align-self: flex-end;
+        padding-top: 20px;
+        padding-bottom: max(20px, calc(20px + env(safe-area-inset-bottom)));
+        animation: sheetIn 260ms cubic-bezier(0.32, 0.72, 0, 1) both
+      }
+
+      /* Drag handle pill at the top of every mobile bottom sheet */
+      .modal::before {
+        content: '';
+        display: block;
+        width: 36px;
+        height: 4px;
+        border-radius: 2px;
+        background: var(--border);
+        margin: 0 auto 16px;
+        opacity: 0.7;
+      }
+
+      @keyframes sheetIn {
+        from { transform: translateY(60px); opacity: 0; }
+        to   { transform: translateY(0);   opacity: 1; }
+      }
+
+      .modal-overlay.active {
+        align-items: flex-end
+      }
+
+      /* Add a little breathing room at the very bottom of the messages list
+         and send panel on mobile so the last message / input isn't crammed
+         against the browser nav bar (when safe-area-inset is 0). */
+      .messages {
+        padding-bottom: max(10px, env(safe-area-inset-bottom))
+      }
+    }
+
+    /* When the on-screen keyboard or browser nav bars pop up on mobile, the
+       visual viewport may shrink. Force the app shell to follow it. */
+    @supports (height: 100dvh) {
+
+      html,
+      body {
+        height: 100dvh
+      }
+    }
+
+    ::-webkit-scrollbar {
+      width: 4px
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 2px
+    }

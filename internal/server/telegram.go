@@ -63,6 +63,12 @@ type TelegramReader struct {
 	msgLimit int // max messages to fetch per channel
 	baseCh   int
 
+	// privates holds invite-hash → resolvedPeer for channels joined
+	// via invite link (private channels with no @username). Populated
+	// once after authentication; iterated alongside `channels` in the
+	// fetch loop.
+	privates *privatePeers
+
 	mu            sync.RWMutex
 	cache         map[string]cachedMessages
 	cacheTTL      time.Duration
@@ -107,8 +113,11 @@ type cachedMessages struct {
 	fetched time.Time
 }
 
-// NewTelegramReader creates a reader for the given channel usernames.
-func NewTelegramReader(cfg TelegramConfig, channelUsernames []string, feed *Feed, msgLimit int, baseCh int) *TelegramReader {
+// NewTelegramReader creates a reader for the given channel usernames
+// and private-channel invite hashes. privateInviteHashes is the list
+// of base64url-ish invite codes (see ParseInviteHash) — empty when no
+// private channels are configured.
+func NewTelegramReader(cfg TelegramConfig, channelUsernames []string, privateInviteHashes []string, feed *Feed, msgLimit int, baseCh int) *TelegramReader {
 	cleaned := make([]string, len(channelUsernames))
 	for i, u := range channelUsernames {
 		cleaned[i] = strings.TrimPrefix(strings.TrimSpace(u), "@")
@@ -122,6 +131,7 @@ func NewTelegramReader(cfg TelegramConfig, channelUsernames []string, feed *Feed
 	return &TelegramReader{
 		cfg:           cfg,
 		channels:      cleaned,
+		privates:      newPrivatePeers(privateInviteHashes),
 		feed:          feed,
 		msgLimit:      msgLimit,
 		baseCh:        baseCh,
@@ -163,6 +173,12 @@ func (tr *TelegramReader) Run(ctx context.Context) error {
 		tr.apiMu.Lock()
 		tr.api = api
 		tr.apiMu.Unlock()
+
+		// Join private channels once at startup. 1 s pacing avoids FLOOD_WAIT.
+		if tr.privates != nil && len(tr.privates.ordered) > 0 {
+			log.Printf("[telegram] resolving %d private channel invite(s)", len(tr.privates.ordered))
+			tr.privates.resolveAllPrivate(ctx, api, time.Second)
+		}
 
 		// Initial fetch
 		tr.fetchAll(ctx, api)
@@ -240,7 +256,12 @@ func (tr *TelegramReader) authenticate(ctx context.Context, client *telegram.Cli
 }
 
 func (tr *TelegramReader) fetchAll(ctx context.Context, api *tg.Client) {
-	log.Printf("[telegram] fetch cycle started for %d channels", len(tr.channels))
+	var privateCount int
+	if tr.privates != nil {
+		privateCount = len(tr.privates.ordered)
+	}
+	log.Printf("[telegram] fetch cycle started for %d public + %d private channels",
+		len(tr.channels), privateCount)
 	start := time.Now()
 	var fetched, failed, skipped int
 	tr.mu.RLock()
@@ -295,8 +316,62 @@ func (tr *TelegramReader) fetchAll(ctx context.Context, api *tg.Client) {
 		fetched++
 		log.Printf("[telegram] updated %s (%s): %d messages (type=%d, canSend=%v)", username, rp.title, len(msgs), rp.chatType, rp.canSend)
 	}
+
+	// Private channels — slot numbers continue after the public list.
+	// Cache key is the short hash-derived channel ID.
+	for i, hash := range tr.privates.ordered {
+		chNum := tr.baseCh + len(tr.channels) + i
+		rp, ok := tr.privates.get(hash)
+		if !ok {
+			// Retry resolve if startup failed.
+			resolved, err := joinOrCheckInvite(ctx, api, hash)
+			if err != nil {
+				log.Printf("[telegram] private %s: resolve failed: %v", hash, err)
+				failed++
+				continue
+			}
+			tr.privates.set(hash, resolved)
+			rp = resolved
+		}
+
+		cacheKey := privateChannelID(hash)
+		tr.mu.RLock()
+		cached, ok := tr.cache[cacheKey]
+		tr.mu.RUnlock()
+		if ok && time.Since(cached.fetched) < cacheTTL {
+			skipped++
+			continue
+		}
+
+		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:  rp.peer,
+			Limit: tr.msgLimit,
+		})
+		if err != nil {
+			log.Printf("[telegram] private %s (%s): get history failed: %v", rp.title, hash, err)
+			failed++
+			continue
+		}
+		userNames := buildUserMap(hist)
+		msgs, err := tr.extractMessages(ctx, api, hist, rp.chatType, userNames)
+		if err != nil {
+			log.Printf("[telegram] private %s (%s): extract messages failed: %v", rp.title, hash, err)
+			failed++
+			continue
+		}
+		tr.mu.Lock()
+		tr.cache[cacheKey] = cachedMessages{msgs: msgs, fetched: time.Now()}
+		tr.mu.Unlock()
+		tr.feed.UpdateChannel(chNum, msgs)
+		tr.feed.SetChatInfo(chNum, rp.chatType, rp.canSend)
+		tr.feed.SetChannelDisplayName(chNum, rp.title)
+		fetched++
+		log.Printf("[telegram] updated private %s: %d messages", rp.title, len(msgs))
+	}
+
 	log.Printf("[telegram] fetch cycle done in %s: %d fetched, %d failed, %d skipped, %d total",
-		time.Since(start).Round(time.Millisecond), fetched, failed, skipped, len(tr.channels))
+		time.Since(start).Round(time.Millisecond), fetched, failed, skipped,
+		len(tr.channels)+privateCount)
 	// Profile pics piggyback the regular cycle: best-effort, doesn't
 	// gate channel data. Each channel's photo is downloaded once and
 	// only re-fetched when Telegram reports a different photo ID.

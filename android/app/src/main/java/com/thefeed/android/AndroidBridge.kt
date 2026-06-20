@@ -62,7 +62,10 @@ class AndroidBridge(private val activity: Activity) {
 
     @JavascriptInterface
     fun getLang(): String {
-        return prefs.getString(PREF_LANG, "fa") ?: "fa"
+        // Empty string when never set — the first-run language modal
+        // uses this to decide whether to show. A default like "fa"
+        // would silently suppress the modal on a fresh install.
+        return prefs.getString(PREF_LANG, "") ?: ""
     }
 
     // ===== Password =====
@@ -276,7 +279,10 @@ class AndroidBridge(private val activity: Activity) {
             "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             "ppt" -> "application/vnd.ms-powerpoint"
             "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            else -> sanitiseMime(fallback)
+            // Unknown extension: don't trust the sniffed fallback (often
+            // text/plain, which makes MediaStore append .txt). Generic
+            // binary leaves the filename verbatim.
+            else -> "application/octet-stream"
         }
     }
 

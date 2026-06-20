@@ -23,7 +23,8 @@ const topResolverLimit = 20
 
 // DNSServer serves feed data over DNS TXT queries.
 type DNSServer struct {
-	domain       string
+	domain       string   // main domain; seeds domains[0] (relay paths derive from cfg.Domain separately)
+	domains      []string // main + extra sub-domains the server answers on (domains[0] == domain)
 	feed         *Feed
 	reader       *TelegramReader // nil when --no-telegram
 	channelCtl   channelRefresher
@@ -40,8 +41,14 @@ type DNSServer struct {
 	sessionsMu sync.Mutex
 	sessions   map[uint16]*uploadSession
 
-	reportCh chan reportEvent
-	debug    bool
+	// chat (optional) serves the standalone messenger on dedicated
+	// sub-domains; chatDomains never overlap the feed domains.
+	chat        *ChatService
+	chatDomains []string
+
+	reportCh   chan reportEvent
+	reportFile *reportFile // optional rotating JSONL sink for the report TUI
+	debug      bool
 }
 
 type channelFetchStats struct {
@@ -51,7 +58,9 @@ type channelFetchStats struct {
 type reportEvent struct {
 	channel  uint16
 	resolver string
-	invalid  bool // GetBlock failed for this query
+	domain   string // which configured domain the query arrived on
+	invalid  bool   // GetBlock failed for this query
+	chat     bool   // query landed on a chat sub-domain
 }
 
 type hourlyFetchReport struct {
@@ -60,9 +69,11 @@ type hourlyFetchReport struct {
 	metadataQueries int64
 	versionQueries  int64
 	mediaQueries    int64 // queries that landed in the media-blob channel range
+	chatQueries     int64 // queries that landed on a chat sub-domain
 	invalidQueries  int64 // GetBlock returned an error (unknown ch / blk OOR)
 	perChannel      map[uint16]*channelFetchStats
 	perResolver     map[string]int64
+	perDomain       map[string]int64 // total queries per configured domain
 }
 
 type uploadSession struct {
@@ -98,7 +109,106 @@ func NewDNSServer(listenAddr, domain string, feed *Feed, queryKey, responseKey [
 		reportCh:     make(chan reportEvent, reportChannelBuffer),
 		debug:        debug,
 	}
+	s.domains = []string{s.domain}
 	return s
+}
+
+// SetExtraDomains adds sub-domains the server also answers feed queries on.
+// The main domain (from NewDNSServer) stays canonical for relay path
+// derivation. Blanks, the main domain, and duplicates are ignored. Call
+// before ListenAndServe.
+func (s *DNSServer) SetExtraDomains(extra []string) {
+	for _, d := range extra {
+		d = strings.TrimSuffix(strings.TrimSpace(d), ".")
+		if d == "" {
+			continue
+		}
+		dup := false
+		for _, existing := range s.domains {
+			if strings.EqualFold(existing, d) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			s.domains = append(s.domains, d)
+		}
+	}
+}
+
+// SetReportFile enables appending each hourly report as a JSON line to a
+// rotating file (the canonical source for the `--report` dashboard). Empty path
+// disables it. Call before ListenAndServe.
+func (s *DNSServer) SetReportFile(path string) error {
+	rf, err := openReportFile(path)
+	if err != nil {
+		return err
+	}
+	s.reportFile = rf
+	return nil
+}
+
+// SetChatService attaches the chat handler on its dedicated sub-domains.
+// Chat domains must not equal any feed domain (nesting under one is fine —
+// longest-suffix matching routes them correctly). Call before ListenAndServe.
+func (s *DNSServer) SetChatService(chat *ChatService) error {
+	for _, cd := range chat.Domains() {
+		cd = strings.TrimSuffix(strings.TrimSpace(cd), ".")
+		if cd == "" {
+			continue
+		}
+		for _, fd := range s.domains {
+			if strings.EqualFold(cd, fd) {
+				return fmt.Errorf("chat domain %q conflicts with feed domain %q", cd, fd)
+			}
+		}
+		for _, existing := range s.chatDomains {
+			if strings.EqualFold(cd, existing) {
+				return fmt.Errorf("duplicate chat domain %q", cd)
+			}
+		}
+		s.chatDomains = append(s.chatDomains, cd)
+	}
+	if len(s.chatDomains) == 0 {
+		return fmt.Errorf("no usable chat domains")
+	}
+	s.chat = chat
+	return nil
+}
+
+// isChatDomain reports whether domain is one of the chat sub-domains.
+func (s *DNSServer) isChatDomain(domain string) bool {
+	for _, d := range s.chatDomains {
+		if strings.EqualFold(d, domain) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchDomain returns the configured domain that qname belongs to, choosing
+// the longest suffix match so a sub-domain that nests under another is handled
+// correctly. Returns false when qname matches none of the configured domains.
+func (s *DNSServer) matchDomain(qname string) (string, bool) {
+	name := strings.ToLower(strings.TrimSuffix(qname, "."))
+	matched := ""
+	for _, d := range s.domains {
+		dl := strings.ToLower(d)
+		if name == dl || strings.HasSuffix(name, "."+dl) {
+			if len(d) > len(matched) {
+				matched = d
+			}
+		}
+	}
+	for _, d := range s.chatDomains {
+		dl := strings.ToLower(d)
+		if name == dl || strings.HasSuffix(name, "."+dl) {
+			if len(d) > len(matched) {
+				matched = d
+			}
+		}
+	}
+	return matched, matched != ""
 }
 
 // SetChannelRefresher allows wiring a non-Telegram channel source (e.g. public reader)
@@ -125,12 +235,29 @@ func (s *DNSServer) SetXReader(xr *XPublicReader) {
 // ListenAndServe starts the DNS server on UDP, shutting down when ctx is cancelled.
 func (s *DNSServer) ListenAndServe(ctx context.Context) error {
 	mux := dns.NewServeMux()
-	mux.HandleFunc(s.domain+".", s.handleQuery)
+	for _, d := range s.domains {
+		mux.HandleFunc(d+".", s.handleQuery)
+	}
+	for _, d := range s.chatDomains {
+		mux.HandleFunc(d+".", s.handleQuery)
+	}
 
+	// Bind the UDP socket ourselves so its buffers can be enlarged: under a
+	// query burst the kernel's default receive buffer overflows and silently
+	// drops packets before the handler ever sees them. Best-effort — the OS
+	// caps the value (e.g. net.core.rmem_max on Linux).
+	pc, err := net.ListenPacket("udp", s.listenAddr)
+	if err != nil {
+		s.reportFile.Close()
+		return err
+	}
+	if uc, ok := pc.(*net.UDPConn); ok {
+		_ = uc.SetReadBuffer(8 << 20)
+		_ = uc.SetWriteBuffer(8 << 20)
+	}
 	server := &dns.Server{
-		Addr:    s.listenAddr,
-		Net:     "udp",
-		Handler: mux,
+		PacketConn: pc,
+		Handler:    mux,
 	}
 
 	go func() {
@@ -139,10 +266,25 @@ func (s *DNSServer) ListenAndServe(ctx context.Context) error {
 		server.Shutdown()
 	}()
 
-	go s.runHourlyReports(ctx)
+	// Run the hourly reporter on a child context so we can wait for its final
+	// flush before closing the report file — otherwise the final report races
+	// reportFile.Close() (and process exit) and is lost on shutdown.
+	reportCtx, cancelReport := context.WithCancel(ctx)
+	reportsDone := make(chan struct{})
+	go func() {
+		s.runHourlyReports(reportCtx)
+		close(reportsDone)
+	}()
 
-	log.Printf("[dns] listening on %s (domain: %s)", s.listenAddr, s.domain)
-	return server.ListenAndServe()
+	log.Printf("[dns] listening on %s (domains: %s)", s.listenAddr, strings.Join(s.domains, ", "))
+	err = server.ActivateAndServe()
+
+	// Server has stopped. Ensure the reporter exits, wait for its final flush
+	// to hit disk, then close the file.
+	cancelReport()
+	<-reportsDone
+	s.reportFile.Close()
+	return err
 }
 
 func (s *DNSServer) handleQuery(w dns.ResponseWriter, r *dns.Msg) {
@@ -162,7 +304,29 @@ func (s *DNSServer) handleQuery(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	channel, block, err := protocol.DecodeQuery(s.queryKey, q.Name, s.domain)
+	// Identify which configured domain this query belongs to (main or a
+	// sub-domain) so the right suffix is stripped before decoding.
+	domain, ok := s.matchDomain(q.Name)
+	if !ok {
+		m.Rcode = dns.RcodeNameError
+		w.WriteMsg(m)
+		return
+	}
+
+	// Chat domains serve only chat. Chat queries are whitened end-to-end (no
+	// feed-style ECB channel header), so they are dispatched by domain and
+	// decoded with the chat codec — never run through DecodeQuery.
+	if s.isChatDomain(domain) {
+		if s.chat == nil {
+			m.Rcode = dns.RcodeNameError
+			w.WriteMsg(m)
+			return
+		}
+		s.handleChatQuery(w, m, q, domain)
+		return
+	}
+
+	channel, block, err := protocol.DecodeQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode query: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -170,29 +334,36 @@ func (s *DNSServer) handleQuery(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	// Feed domains never serve chat.
+	if channel == protocol.ChatChannel {
+		m.Rcode = dns.RcodeRefused
+		w.WriteMsg(m)
+		return
+	}
+
 	// Handle upstream init/data queries
 	switch channel {
 	case protocol.UpstreamInitChannel:
-		s.handleUpstreamInitQuery(w, m, q)
+		s.handleUpstreamInitQuery(w, m, q, domain)
 		return
 	case protocol.UpstreamDataChannel:
-		s.handleUpstreamDataQuery(w, m, q)
+		s.handleUpstreamDataQuery(w, m, q, domain)
 		return
 	}
 
 	// Handle send-message queries
 	if channel == protocol.SendChannel {
-		s.handleSendQuery(w, m, q)
+		s.handleSendQuery(w, m, q, domain)
 		return
 	}
 
 	// Handle admin command queries
 	if channel == protocol.AdminChannel {
-		s.handleAdminQuery(w, m, q)
+		s.handleAdminQuery(w, m, q, domain)
 		return
 	}
 
-	s.trackRequestStart(channel, resolverHost(w.RemoteAddr()))
+	s.trackRequestStart(channel, resolverHost(w.RemoteAddr()), domain)
 	if s.debug {
 		log.Printf("[dns] query ch=%d blk=%d from=%s name=%s", channel, block, resolverHost(w.RemoteAddr()), q.Name)
 	}
@@ -225,13 +396,20 @@ func (s *DNSServer) handleQuery(w dns.ResponseWriter, r *dns.Msg) {
 			Name:   q.Name,
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET,
-			Ttl:    1,
+			Ttl:    defaultResponseTTL,
 		},
 		Txt: txtParts,
 	})
 
 	w.WriteMsg(m)
 }
+
+// defaultResponseTTL is what we put on every DNS reply. A normal-looking
+// value blends with real-world DNS — TTL=1 used to scream "non-standard
+// traffic". Random-suffix queries stay uncacheable by uniqueness; only the
+// deterministic ones (opt-in via the client setting) benefit from the
+// resolver-side cache window this enables.
+const defaultResponseTTL uint32 = 60
 
 // splitTXT splits a string into 255-byte chunks for DNS TXT records.
 func splitTXT(s string) []string {
@@ -258,11 +436,32 @@ func (s *DNSServer) writeEncodedResponse(w dns.ResponseWriter, m *dns.Msg, name 
 			Name:   name,
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET,
-			Ttl:    1,
+			Ttl:    defaultResponseTTL,
 		},
 		Txt: splitTXT(encoded),
 	})
 	w.WriteMsg(m)
+}
+
+func (s *DNSServer) handleChatQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
+	selector, counter, payload, err := protocol.DecodeChatCell(s.queryKey, q.Name, domain)
+	if err != nil {
+		if s.debug {
+			log.Printf("[chat] decode cell: %v", err)
+		}
+		m.Rcode = dns.RcodeNameError
+		w.WriteMsg(m)
+		return
+	}
+	select {
+	case s.reportCh <- reportEvent{chat: true, resolver: resolverHost(w.RemoteAddr()), domain: domain}:
+	default:
+	}
+	if s.debug {
+		log.Printf("[chat] cell sel=%x ctr=%d dom=%s name=%s from=%s", selector, counter, domain, q.Name, resolverHost(w.RemoteAddr()))
+	}
+	resp := s.chat.HandleCell(selector, counter, payload, domain, time.Now())
+	s.writeEncodedResponse(w, m, q.Name, resp)
 }
 
 func (s *DNSServer) cleanupExpiredSessions(now time.Time) {
@@ -273,14 +472,14 @@ func (s *DNSServer) cleanupExpiredSessions(now time.Time) {
 	}
 }
 
-func (s *DNSServer) handleUpstreamInitQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question) {
+func (s *DNSServer) handleUpstreamInitQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
 	if !s.allowManage {
 		m.Rcode = dns.RcodeRefused
 		w.WriteMsg(m)
 		return
 	}
 
-	init, err := protocol.DecodeUpstreamInitQuery(s.queryKey, q.Name, s.domain)
+	init, err := protocol.DecodeUpstreamInitQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode upstream init: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -312,14 +511,14 @@ func (s *DNSServer) handleUpstreamInitQuery(w dns.ResponseWriter, m *dns.Msg, q 
 	s.writeEncodedResponse(w, m, q.Name, []byte("READY"))
 }
 
-func (s *DNSServer) handleUpstreamDataQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question) {
+func (s *DNSServer) handleUpstreamDataQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
 	if !s.allowManage {
 		m.Rcode = dns.RcodeRefused
 		w.WriteMsg(m)
 		return
 	}
 
-	sessionID, index, chunk, err := protocol.DecodeUpstreamBlockQuery(s.queryKey, q.Name, s.domain)
+	sessionID, index, chunk, err := protocol.DecodeUpstreamBlockQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode upstream block: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -426,7 +625,7 @@ func (s *DNSServer) executeUpstreamPayload(sess *uploadSession, payload []byte) 
 	}
 }
 
-func (s *DNSServer) handleSendQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question) {
+func (s *DNSServer) handleSendQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
 	if !s.allowManage {
 		log.Printf("[dns] send query rejected: --allow-manage not set")
 		m.Rcode = dns.RcodeRefused
@@ -441,7 +640,7 @@ func (s *DNSServer) handleSendQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Ques
 		return
 	}
 
-	targetCh, message, err := protocol.DecodeSendQuery(s.queryKey, q.Name, s.domain)
+	targetCh, message, err := protocol.DecodeSendQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode send query: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -463,7 +662,7 @@ func (s *DNSServer) handleSendQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Ques
 	s.writeEncodedResponse(w, m, q.Name, []byte("OK"))
 }
 
-func (s *DNSServer) handleAdminQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question) {
+func (s *DNSServer) handleAdminQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
 	if !s.allowManage {
 		log.Printf("[dns] admin query rejected: --allow-manage not set")
 		m.Rcode = dns.RcodeRefused
@@ -471,7 +670,7 @@ func (s *DNSServer) handleAdminQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Que
 		return
 	}
 
-	cmd, arg, err := protocol.DecodeAdminQuery(s.queryKey, q.Name, s.domain)
+	cmd, arg, err := protocol.DecodeAdminQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode admin query: %v", err)
 		m.Rcode = dns.RcodeNameError
@@ -654,12 +853,12 @@ func resolverHost(addr net.Addr) string {
 	return addr.String()
 }
 
-func (s *DNSServer) trackRequestStart(channel uint16, resolver string) {
+func (s *DNSServer) trackRequestStart(channel uint16, resolver, domain string) {
 	// Exclude special control channels from per-channel content reporting.
 	if channel == protocol.UpstreamInitChannel || channel == protocol.UpstreamDataChannel || channel == protocol.SendChannel || channel == protocol.AdminChannel {
 		return
 	}
-	s.reportCh <- reportEvent{channel: channel, resolver: resolver}
+	s.reportCh <- reportEvent{channel: channel, resolver: resolver, domain: domain}
 }
 
 func (s *DNSServer) trackInvalidQuery() {
@@ -693,6 +892,7 @@ func newHourlyFetchReport(start time.Time) *hourlyFetchReport {
 		windowStart: start,
 		perChannel:  make(map[uint16]*channelFetchStats),
 		perResolver: make(map[string]int64),
+		perDomain:   make(map[string]int64),
 	}
 }
 
@@ -704,6 +904,13 @@ func recordReportQuery(rep *hourlyFetchReport, event reportEvent) {
 	rep.totalQueries++
 	if event.resolver != "" {
 		rep.perResolver[event.resolver]++
+	}
+	if event.domain != "" {
+		rep.perDomain[event.domain]++
+	}
+	if event.chat {
+		rep.chatQueries++
+		return
 	}
 	channel := event.channel
 	if channel == protocol.MetadataChannel {
@@ -787,6 +994,22 @@ func (s *DNSServer) emitHourlyReport(rep *hourlyFetchReport, final bool) {
 		resolvers = resolvers[:topResolverLimit]
 	}
 
+	// Per-domain query totals (multi-domain): kept as its own report field.
+	type domainEntry struct {
+		Domain  string `json:"domain"`
+		Queries int64  `json:"queries"`
+	}
+	domains := make([]domainEntry, 0, len(rep.perDomain))
+	for d, q := range rep.perDomain {
+		domains = append(domains, domainEntry{Domain: d, Queries: q})
+	}
+	sort.Slice(domains, func(i, j int) bool {
+		if domains[i].Queries == domains[j].Queries {
+			return domains[i].Domain < domains[j].Domain
+		}
+		return domains[i].Queries > domains[j].Queries
+	})
+
 	payload := map[string]any{
 		"type":                 "dns_hourly_report",
 		"from":                 rep.windowStart.UTC().Format(time.RFC3339),
@@ -795,13 +1018,18 @@ func (s *DNSServer) emitHourlyReport(rep *hourlyFetchReport, final bool) {
 		"totalMetadataQueries": rep.metadataQueries,
 		"totalVersionQueries":  rep.versionQueries,
 		"totalMediaQueries":    rep.mediaQueries,
+		"totalChatQueries":     rep.chatQueries,
 		"totalInvalidQueries":  rep.invalidQueries,
 		"channels":             entries,
 		"topResolvers":         resolvers,
+		"domains":              domains,
 		"finalFlush":           final,
 	}
 	if mediaCache := s.feed.MediaCache(); mediaCache != nil {
 		payload["mediaCache"] = mediaCache.Stats()
+	}
+	if s.chat != nil {
+		payload["chat"] = s.chat.StatsSnapshot()
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -809,4 +1037,7 @@ func (s *DNSServer) emitHourlyReport(rep *hourlyFetchReport, final bool) {
 		return
 	}
 	log.Printf("[dns_hourly] %s", string(b))
+	if err := s.reportFile.Append(b); err != nil {
+		log.Printf("[dns_hourly] write report file: %v", err)
+	}
 }

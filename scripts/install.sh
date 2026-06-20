@@ -7,6 +7,14 @@ yellow='\033[0;33m'
 plain='\033[0m'
 
 GITHUB_REPO="sartoopjj/thefeed"
+GITLAB_REPO="sartoopjj/thefeed"
+# URL-encoded GitLab project path for /api/v4/projects/:id calls.
+GITLAB_REPO_ENC="sartoopjj%2Fthefeed"
+# Source for release downloads: github, gitlab, or auto.
+#   auto = try GitHub first, fall back to GitLab if GitHub is unreachable
+#          (used while the GitHub account is suspended).
+# Can be overridden with --source <github|gitlab> on the CLI.
+SOURCE="${SOURCE:-auto}"
 INSTALL_DIR="/opt/thefeed"
 DATA_DIR="${INSTALL_DIR}/data"
 SERVICE_FILE="/etc/systemd/system/thefeed-server.service"
@@ -65,21 +73,58 @@ install_base() {
     esac
 }
 
+# Decide which mirror to talk to. Called lazily before any network call.
+# "auto" picks GitHub if api.github.com responds with a non-empty tag_name
+# for the latest release; otherwise falls back to GitLab.
+resolve_source() {
+    if [[ "$SOURCE" == "github" || "$SOURCE" == "gitlab" ]]; then
+        return
+    fi
+    local probe
+    probe=$(curl -Ls --max-time 6 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -1)
+    if [[ -n "$probe" ]]; then
+        SOURCE="github"
+    else
+        SOURCE="gitlab"
+    fi
+    echo -e "Release source: ${green}${SOURCE}${plain}" >&2
+}
+
 get_latest_version() {
+    resolve_source
     local version
-    version=$(curl -Ls "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ -z "$version" ]]; then
-        echo -e "${yellow}Trying with IPv4...${plain}" >&2
-        version=$(curl -4 -Ls "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ "$SOURCE" == "gitlab" ]]; then
+        version=$(curl -Ls "https://gitlab.com/api/v4/projects/${GITLAB_REPO_ENC}/releases?per_page=1" \
+            | sed -E 's/\},\{/}\n{/g' | head -1 \
+            | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
+        if [[ -z "$version" ]]; then
+            version=$(curl -4 -Ls "https://gitlab.com/api/v4/projects/${GITLAB_REPO_ENC}/releases?per_page=1" \
+                | sed -E 's/\},\{/}\n{/g' | head -1 \
+                | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
+        fi
+    else
+        version=$(curl -Ls "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [[ -z "$version" ]]; then
+            echo -e "${yellow}Trying with IPv4...${plain}" >&2
+            version=$(curl -4 -Ls "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        fi
     fi
     echo "$version"
 }
 
 _fetch_releases() {
+    resolve_source
     local body
-    body=$(curl -Ls "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20")
-    if [[ -z "$body" ]]; then
-        body=$(curl -4 -Ls "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20")
+    if [[ "$SOURCE" == "gitlab" ]]; then
+        body=$(curl -Ls "https://gitlab.com/api/v4/projects/${GITLAB_REPO_ENC}/releases?per_page=20")
+        if [[ -z "$body" ]]; then
+            body=$(curl -4 -Ls "https://gitlab.com/api/v4/projects/${GITLAB_REPO_ENC}/releases?per_page=20")
+        fi
+    else
+        body=$(curl -Ls "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20")
+        if [[ -z "$body" ]]; then
+            body=$(curl -4 -Ls "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20")
+        fi
     fi
     echo "$body"
 }
@@ -89,13 +134,30 @@ _split_releases() {
     _fetch_releases | tr -d '\n' | sed 's/{/\n{/g'
 }
 
+# Decide whether a release JSON object (one line) is a pre-release.
+# GitHub exposes a boolean field; GitLab does not, so on GitLab we fall back
+# to the tag-name convention (anything with a hyphen, e.g. v1.0.0-rc1).
+_is_pre_line() {
+    local line="$1" tag
+    if echo "$line" | grep -qE '"prerelease":[[:space:]]*true'; then
+        return 0
+    fi
+    if [[ "$SOURCE" == "gitlab" ]]; then
+        tag=$(echo "$line" | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
+        [[ "$tag" == *-* ]] && return 0
+    fi
+    return 1
+}
+
 get_latest_prerelease() {
-    # GitHub's pretty-printed JSON has "prerelease": true (with space). After
-    # tr -d '\n' the spaces stay, so the grep needs to allow whitespace.
-    _split_releases \
-        | grep -E '"prerelease":[[:space:]]*true' \
-        | head -1 \
-        | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/'
+    local line
+    while IFS= read -r line; do
+        case "$line" in *'"tag_name"'*) ;; *) continue ;; esac
+        if _is_pre_line "$line"; then
+            echo "$line" | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/'
+            return
+        fi
+    done < <(_split_releases)
 }
 
 list_versions() {
@@ -107,7 +169,7 @@ list_versions() {
             *) continue ;;
         esac
         tag=$(echo "$line" | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
-        if echo "$line" | grep -qE '"prerelease":[[:space:]]*true'; then
+        if _is_pre_line "$line"; then
             label="[pre-release]"
         else
             label="[stable]"
@@ -120,20 +182,28 @@ list_versions() {
 }
 
 download_binary() {
+    resolve_source
     local version="$1"
     local arch_name
     arch_name=$(arch)
     local binary_name="thefeed-server-linux-${arch_name}"
-    local url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${binary_name}"
+    local url
+    if [[ "$SOURCE" == "gitlab" ]]; then
+        # GitLab Release direct-asset URL — same path the CI registers via
+        # release-cli's --assets-link.
+        url="https://gitlab.com/${GITLAB_REPO}/-/releases/${version}/downloads/${binary_name}"
+    else
+        url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${binary_name}"
+    fi
 
-    echo -e "${green}Downloading thefeed-server ${version} for linux/${arch_name}...${plain}"
+    echo -e "${green}Downloading thefeed-server ${version} for linux/${arch_name} from ${SOURCE}...${plain}"
     mkdir -p "$INSTALL_DIR"
 
     curl -4fLo "${INSTALL_DIR}/thefeed-server" "$url"
     if [[ $? -ne 0 ]]; then
         echo -e "${red}Failed to download binary from:${plain}"
         echo -e "${red}  ${url}${plain}"
-        echo -e "${yellow}Please check that the version exists and your server can reach GitHub${plain}"
+        echo -e "${yellow}Please check that the version exists and your server can reach the ${SOURCE} mirror${plain}"
         exit 1
     fi
 
@@ -178,6 +248,43 @@ setup_x_accounts() {
         echo -e "  ${green}Added ${account}${plain}"
     done
     mv "$DATA_DIR/x_accounts.txt.tmp" "$DATA_DIR/x_accounts.txt"
+}
+
+setup_private_channels() {
+    echo -e "\n${green}Setting up private Telegram channel invites...${plain}"
+    echo -e "${yellow}Private channels require the server to be logged into Telegram.${plain}"
+    echo -e "${yellow}Paste each invite link in any of these shapes:${plain}"
+    echo "  https://t.me/+aBcDeF123456    https://t.me/joinchat/aBcDeF123456"
+    echo "  tg://join?invite=aBcDeF…       +aBcDeF123456    aBcDeF123456"
+    {
+        echo "# Telegram private-channel invite links (one per line)"
+        echo "# Server must be logged into Telegram for these to work."
+        echo "# Lines starting with # are comments"
+    } > "$DATA_DIR/private_channels.txt.tmp"
+
+    echo ""
+    echo -e "${yellow}Enter invite links (one per line, empty line to finish):${plain}"
+    local added=0
+    while true; do
+        read -rp "  Invite: " link
+        if [[ -z "$link" ]]; then
+            break
+        fi
+        # Early reject for obvious public-username typos. Strict
+        # validation happens server-side in ParseInviteHash.
+        if [[ "$link" =~ ^https?://t\.me/[^+] ]] && [[ ! "$link" =~ /joinchat/ ]]; then
+            echo -e "  ${red}Skipped: ${link} looks like a public username, not an invite link.${plain}"
+            echo -e "  ${red}Put public channels in channels.txt instead.${plain}"
+            continue
+        fi
+        echo "$link" >> "$DATA_DIR/private_channels.txt.tmp"
+        echo -e "  ${green}Added ${link}${plain}"
+        added=$((added + 1))
+    done
+    mv "$DATA_DIR/private_channels.txt.tmp" "$DATA_DIR/private_channels.txt"
+    if [[ $added -eq 0 ]]; then
+        echo -e "  ${yellow}(none added)${plain}"
+    fi
 }
 
 # Helper: update or add a key=value in the env file
@@ -231,32 +338,108 @@ setup_config() {
         setup_x_accounts
     fi
 
+    # --- Private Telegram channels ---
+    # Skipped in --no-telegram mode (joining needs a logged-in session).
+    if [[ "${THEFEED_NO_TELEGRAM:-}" != "1" ]]; then
+        if [[ -f "$DATA_DIR/private_channels.txt" ]]; then
+            local pc_count
+            pc_count=$(grep -cv '^#\|^$' "$DATA_DIR/private_channels.txt" 2>/dev/null || echo 0)
+            echo -e "${yellow}Private channel invites configured: ${pc_count}${plain}"
+            read -rp "Change private channel invites? [y/N]: " change_pc
+            if [[ "$change_pc" == "y" || "$change_pc" == "Y" ]]; then
+                setup_private_channels
+            fi
+        else
+            read -rp "Add private channel invite links? [y/N]: " add_pc
+            if [[ "$add_pc" == "y" || "$add_pc" == "Y" ]]; then
+                setup_private_channels
+            fi
+        fi
+    fi
+
     # --- Server settings ---
     echo -e "\n${green}═══════════════════════════════════════${plain}"
     echo -e "${green}  Server Configuration${plain}"
     echo -e "${green}═══════════════════════════════════════${plain}"
     echo ""
 
-    local cur_domain cur_key cur_limit cur_listen cur_fetch_interval
+    local cur_domain cur_key cur_limit cur_listen cur_fetch_interval cur_extra_domains
     if $is_update; then
         cur_domain=$(env_get THEFEED_DOMAIN)
         cur_key=$(env_get THEFEED_KEY)
         cur_limit=$(env_get THEFEED_MSG_LIMIT)
         cur_listen=$(env_get THEFEED_LISTEN)
         cur_fetch_interval=$(env_get THEFEED_FETCH_INTERVAL)
+        cur_extra_domains=$(env_get THEFEED_EXTRA_DOMAINS)
     fi
 
     local domain=""
     while true; do
         if [[ -n "$cur_domain" ]]; then
-            read -rp "DNS domain [${cur_domain}]: " domain
+            read -rp "Main DNS domain [${cur_domain}]: " domain
             domain="${domain:-$cur_domain}"
         else
-            read -rp "DNS domain (e.g., t.example.com): " domain
+            read -rp "Main DNS domain (e.g., t.example.com): " domain
         fi
         if [[ -n "$domain" ]]; then break; fi
         echo -e "${red}Domain cannot be empty${plain}"
     done
+
+    # Optional extra domains/sub-domains: clients spread feed queries across the
+    # main domain + these (they can be entirely separate domains, e.g.
+    # nws2.other.com). The main domain stays canonical for relay paths.
+    # Stored comma-separated in THEFEED_EXTRA_DOMAINS.
+    local extra_domains="$cur_extra_domains"
+    local do_collect_ed=false
+    echo ""
+    if [[ -n "$cur_extra_domains" ]]; then
+        echo -e "${yellow}Extra domains: ${cur_extra_domains}${plain}"
+        read -rp "Change extra domains? [y/N]: " change_ed
+        [[ "$change_ed" == "y" || "$change_ed" == "Y" ]] && do_collect_ed=true
+    else
+        read -rp "Add extra domains? Clients spread queries across them. [y/N]: " add_ed
+        [[ "$add_ed" == "y" || "$add_ed" == "Y" ]] && do_collect_ed=true
+    fi
+    if $do_collect_ed; then
+        echo -e "${yellow}Enter each extra domain (one per line, empty line to finish):${plain}"
+        extra_domains=""
+        while true; do
+            read -rp "  Domain: " ed
+            ed="${ed//[[:space:]]/}"
+            [[ -z "$ed" ]] && break
+            if [[ -n "$extra_domains" ]]; then extra_domains="${extra_domains},${ed}"; else extra_domains="$ed"; fi
+            echo -e "  ${green}Added ${ed}${plain}"
+        done
+    fi
+
+    # Chat messenger: a standalone, end-to-end-encrypted messenger served on
+    # its own dedicated sub-domain(s) — never on the feed domains. Stored
+    # comma-separated in THEFEED_CHAT_DOMAINS; empty = messenger disabled.
+    local cur_chat_domains=""
+    $is_update && cur_chat_domains=$(env_get THEFEED_CHAT_DOMAINS)
+    local chat_domains="$cur_chat_domains"
+    local do_collect_cd=false
+    echo ""
+    if [[ -n "$cur_chat_domains" ]]; then
+        echo -e "${yellow}Messenger domains: ${cur_chat_domains}${plain}"
+        read -rp "Change messenger domains? [y/N]: " change_cd
+        [[ "$change_cd" == "y" || "$change_cd" == "Y" ]] && do_collect_cd=true
+    else
+        read -rp "Enable the messenger? It needs dedicated sub-domain(s). [y/N]: " add_cd
+        [[ "$add_cd" == "y" || "$add_cd" == "Y" ]] && do_collect_cd=true
+    fi
+    if $do_collect_cd; then
+        echo -e "${yellow}Enter each messenger sub-domain (must differ from the feed domains; empty line to finish):${plain}"
+        chat_domains=""
+        while true; do
+            read -rp "  Domain: " cdom
+            cdom="${cdom//[[:space:]]/}"
+            [[ -z "$cdom" ]] && break
+            if [[ "$cdom" == "$domain" ]]; then echo -e "  ${red}Must differ from the main feed domain${plain}"; continue; fi
+            if [[ -n "$chat_domains" ]]; then chat_domains="${chat_domains},${cdom}"; else chat_domains="$cdom"; fi
+            echo -e "  ${green}Added ${cdom}${plain}"
+        done
+    fi
 
     local passkey=""
     while true; do
@@ -427,6 +610,8 @@ setup_config() {
 
         cat > "$DATA_DIR/thefeed.env" <<ENVEOF
 THEFEED_DOMAIN=${domain}
+THEFEED_EXTRA_DOMAINS=${extra_domains}
+THEFEED_CHAT_DOMAINS=${chat_domains}
 THEFEED_KEY=${passkey}
 THEFEED_ALLOW_MANAGE=${allow_manage}
 THEFEED_MSG_LIMIT=${msg_limit}
@@ -502,6 +687,8 @@ ENVEOF
 
     cat > "$DATA_DIR/thefeed.env" <<ENVEOF
 THEFEED_DOMAIN=${domain}
+THEFEED_EXTRA_DOMAINS=${extra_domains}
+THEFEED_CHAT_DOMAINS=${chat_domains}
 THEFEED_KEY=${passkey}
 THEFEED_ALLOW_MANAGE=${allow_manage}
 THEFEED_MSG_LIMIT=${msg_limit}
@@ -534,6 +721,12 @@ telegram_login() {
     echo -e "${yellow}This will authenticate with Telegram and save the session.${plain}"
     echo ""
 
+    local was_active=0
+    if systemctl is-active --quiet thefeed-server 2>/dev/null; then
+        was_active=1
+        systemctl stop thefeed-server
+    fi
+
     set -a
     source "$DATA_DIR/thefeed.env"
     set +a
@@ -546,16 +739,19 @@ telegram_login() {
         --api-id "$TELEGRAM_API_ID" \
         --api-hash "$TELEGRAM_API_HASH" \
         --phone "$TELEGRAM_PHONE"
+    local rc=$?
 
-    if [[ $? -ne 0 ]]; then
+    if [[ $rc -ne 0 ]]; then
         echo -e "${red}Telegram login failed${plain}"
         echo -e "${yellow}You can retry later with:${plain}"
         echo -e "  sudo bash install.sh --login"
+        [[ $was_active -eq 1 ]] && systemctl start thefeed-server
         return 1
     fi
 
     chmod 600 "$DATA_DIR/session.json"
     echo -e "${green}Telegram login successful, session saved.${plain}"
+    [[ $was_active -eq 1 ]] && systemctl start thefeed-server
 }
 
 install_service() {
@@ -601,6 +797,16 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
+# Resource limits — public-facing multi-user servers can have tens
+# of thousands of concurrent sockets (web clients + DNS upstream +
+# Telegram MTProto + outgoing media fetches). The default systemd
+# RLIMIT_NOFILE (usually 1024) trips well before that, surfacing as
+# "too many open files" errors and dropped connections. Raising the
+# limits here means operators don't have to run ulimit by hand.
+LimitNOFILE=524288
+LimitNPROC=infinity
+TasksMax=infinity
+
 # Security hardening
 ProtectHome=true
 PrivateTmp=true
@@ -635,6 +841,7 @@ show_usage() {
     echo -e "│  All data in: ${blue}${INSTALL_DIR}/${plain}                             │"
     echo -e "│  ${blue}Config:${plain}   ${DATA_DIR}/thefeed.env                │"
     echo -e "│  ${blue}Channels:${plain} ${DATA_DIR}/channels.txt               │"
+    echo -e "│  ${blue}Private:${plain}  ${DATA_DIR}/private_channels.txt       │"
     echo -e "│  ${blue}X acct:${plain}  ${DATA_DIR}/x_accounts.txt              │"
     echo -e "│  ${blue}Session:${plain}  ${DATA_DIR}/session.json               │"
     echo -e "│  ${blue}Binary:${plain}   ${INSTALL_DIR}/thefeed-server                  │"
@@ -643,6 +850,7 @@ show_usage() {
     echo -e "│  Update:    ${blue}curl -Ls URL | sudo bash${plain}                    │"
     echo -e "│  Uninstall: ${blue}curl -Ls URL | sudo bash -s -- --uninstall${plain}  │"
     echo -e "│  Re-login:  ${blue}curl -Ls URL | sudo bash -s -- --login${plain}      │"
+    echo -e "│  Config:    ${blue}curl -Ls URL | sudo bash -s -- --config${plain}     │"
     echo -e "│                                                         │"
     echo -e "│  ${red}⚠ NEVER share your passphrase publicly!${plain}                │"
     echo -e "│  ${red}Anyone with it can read ALL your messages.${plain}             │"
@@ -735,6 +943,9 @@ install_thefeed() {
     echo -e "${green}  thefeed ${version} installed successfully!${plain}"
     echo -e "${green}═══════════════════════════════════════${plain}"
     show_usage
+
+    # Print the import URI so the operator can share/import the feed right away.
+    show_config
 }
 
 login_only() {
@@ -749,6 +960,33 @@ login_only() {
     telegram_login
     echo -e "${green}Restarting service...${plain}"
     systemctl restart thefeed-server || true
+}
+
+show_config() {
+    if [[ ! -f "$DATA_DIR/thefeed.env" ]]; then
+        echo -e "${red}Config not found. Run install first: bash install.sh${plain}"
+        exit 1
+    fi
+    if [[ ! -f "${INSTALL_DIR}/thefeed-server" ]]; then
+        echo -e "${red}Binary not found. Run install first: bash install.sh${plain}"
+        exit 1
+    fi
+    set -a
+    source "$DATA_DIR/thefeed.env"
+    set +a
+
+    echo -e "\n${green}═══════════════════════════════════════${plain}"
+    echo -e "${green}  Current server config (import URI)${plain}"
+    echo -e "${green}═══════════════════════════════════════${plain}"
+    # --print-config loads/generates the signing key under --data-dir and
+    # prints thefeed://domain/key?sk=<pubkey>&r=<bootstrap resolvers>.
+    "$INSTALL_DIR/thefeed-server" --print-config \
+        --data-dir "$DATA_DIR" \
+        --domain "$THEFEED_DOMAIN" \
+        --key "$THEFEED_KEY"
+    echo ""
+    echo -e "${yellow}Share this URI so others can import your feed.${plain}"
+    echo -e "${red}⚠ It contains your passphrase — anyone with it can read this feed.${plain}"
 }
 
 uninstall_thefeed() {
@@ -789,7 +1027,10 @@ show_help() {
     echo -e "  ${green}<tag>${plain}                  Positional form, e.g.  bash install.sh v1.0.0"
     echo -e "  ${green}--pre${plain}                  Install the latest pre-release (beta/rc)"
     echo -e "  ${green}--list${plain}                 List recent releases with stable/pre labels"
+    echo -e "  ${green}--source <name>${plain}        Pick release mirror: github | gitlab | auto (default: auto)"
+    echo -e "  ${green}--github${plain} / ${green}--gitlab${plain}     Shortcut for --source github / --source gitlab"
     echo -e "  ${green}--login${plain}                Re-authenticate with Telegram"
+    echo -e "  ${green}--config${plain}               Print the current server config import URI (domain, key, sk=, resolvers)"
     echo -e "  ${green}--uninstall${plain}            Remove thefeed"
     echo -e "  ${green}--help${plain}                 Show this help"
     echo ""
@@ -803,11 +1044,16 @@ show_help() {
     echo -e "  Reads public Telegram channels without needing Telegram credentials."
     echo -e "  Safer because no phone number or API keys are stored on the server."
     echo ""
-    echo -e "Quick commands:"
+    echo -e "Quick commands (GitHub mirror):"
     echo -e "  Install/Update:  ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash${plain}"
     echo -e "  Install beta:    ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash -s -- --pre${plain}"
     echo -e "  Roll back:       ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash -s -- --version v0.9.2${plain}"
     echo -e "  Uninstall:       ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash -s -- --uninstall${plain}"
+    echo -e "  Show config:     ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash -s -- --config${plain}"
+    echo ""
+    echo -e "Quick commands (GitLab mirror — use while the GitHub account is unavailable):"
+    echo -e "  Install/Update:  ${blue}curl -Ls https://gitlab.com/${GITLAB_REPO}/-/raw/main/scripts/install.sh | sudo bash -s -- --gitlab${plain}"
+    echo -e "  Install beta:    ${blue}curl -Ls https://gitlab.com/${GITLAB_REPO}/-/raw/main/scripts/install.sh | sudo bash -s -- --gitlab --pre${plain}"
 }
 
 # Main
@@ -825,12 +1071,29 @@ while [[ $# -gt 0 ]]; do
             ACTION="help"; shift ;;
         --login)
             ACTION="login"; shift ;;
+        --config|--show-config)
+            ACTION="config"; shift ;;
         --uninstall)
             ACTION="uninstall"; shift ;;
         --list)
             ACTION="list"; shift ;;
         --pre|--prerelease|--beta)
             REQUEST_CHANNEL="pre"; shift ;;
+        --source)
+            shift
+            if [[ -z "${1:-}" ]]; then
+                echo -e "${red}--source requires one of: github, gitlab, auto${plain}"
+                exit 1
+            fi
+            case "$1" in github|gitlab|auto) SOURCE="$1" ;; *) echo -e "${red}invalid --source: $1${plain}"; exit 1 ;; esac
+            shift ;;
+        --source=*)
+            case "${1#*=}" in github|gitlab|auto) SOURCE="${1#*=}" ;; *) echo -e "${red}invalid --source: ${1#*=}${plain}"; exit 1 ;; esac
+            shift ;;
+        --github)
+            SOURCE="github"; shift ;;
+        --gitlab)
+            SOURCE="gitlab"; shift ;;
         --version|-v)
             shift
             if [[ -z "${1:-}" ]]; then
@@ -860,6 +1123,8 @@ case "$ACTION" in
         show_help; exit 0 ;;
     login)
         login_only; exit 0 ;;
+    config)
+        show_config; exit 0 ;;
     uninstall)
         uninstall_thefeed; exit 0 ;;
     list)

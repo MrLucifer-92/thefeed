@@ -433,7 +433,7 @@ func extractFirstImgSrc(htmlFrag string) string {
 }
 
 // extractLinkUsername extracts the username from a Nitter/X status URL.
-// e.g. "https://nitter.net/IranIntlTV/status/123" → "IranIntlTV"
+// e.g. "https://nitter.net/SomeUser/status/123" → "SomeUser"
 func extractLinkUsername(link string) string {
 	if link == "" {
 		return ""

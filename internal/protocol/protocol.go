@@ -20,12 +20,6 @@ const (
 	// DefaultBlockPayload is kept for compatibility; equals MaxBlockPayload.
 	DefaultBlockPayload = MaxBlockPayload
 
-	// MediaBlockPayload is the fixed payload size used for media (image/file)
-	// blocks. Media blocks are raw binary, and using a fixed size simplifies
-	// both server-side block boundaries and client-side range/resume math.
-	// Tuned for safe DNS UDP response after AES-GCM + base64 + padding.
-	MediaBlockPayload = MaxBlockPayload
-
 	// DefaultMaxPadding is the default random padding added to responses to vary DNS response size.
 	DefaultMaxPadding = 32
 
@@ -97,17 +91,29 @@ const (
 
 // Metadata holds channel 0 data: server info + channel list.
 type Metadata struct {
-	Marker           [MarkerSize]byte
+	// Marker is the 3 bytes at the start of the serialized metadata
+	// payload. Legacy encoder fills it with a random per-server marker;
+	// the extended encoder fills it with EMH magic + flags. Treat it as
+	// opaque on the wire and use PeekExtendedHeader to interpret.
+	Marker [MarkerSize]byte
+	// Timestamp is the 4 bytes immediately after Marker. Legacy encoder
+	// fills it with a unix timestamp; the extended encoder fills it with
+	// EMH block_count + content_hash. Treat it as opaque and use
+	// PeekExtendedHeader to interpret.
 	Timestamp        uint32
 	NextFetch        uint32 // unix timestamp of next server-side fetch (0 = unknown)
 	TelegramLoggedIn bool   // true if server has an active Telegram session
-	Channels         []ChannelInfo
+	// ChatAvailable advertises that this server has the messenger configured
+	// (flags bit 0x02). Lets clients skip the ChatInfo probe on chatless
+	// servers and tell apart "no chat" from "chat, but you lack the key".
+	ChatAvailable bool
+	Channels      []ChannelInfo
 }
 
 // ChannelInfo describes a single feed channel.
 type ChannelInfo struct {
 	Name        string
-	DisplayName string   // human-readable title; empty means fall back to Name
+	DisplayName string // human-readable title; empty means fall back to Name
 	Blocks      uint16
 	LastMsgID   uint32
 	ContentHash uint32   // CRC32 of serialized message data; changes on edits
@@ -132,6 +138,11 @@ func ContentHashOf(msgs []Message) uint32 {
 // SerializeMetadata encodes metadata into bytes for channel 0 blocks.
 // Format: marker(3) + timestamp(4) + nextFetch(4) + flags(1) + channelCount(2) + per-channel data
 // Per-channel: nameLen(1) + name + blocks(2) + lastMsgID(4) + contentHash(4) + chatType(1) + flags(1)
+//
+// New servers wrap the same payload with an extended header that reuses
+// the otherwise-unread Marker + Timestamp fields — see
+// EncodeMetadataExtended in metadata_ext.go. Old clients keep parsing this
+// format unchanged and just ignore those fields.
 func SerializeMetadata(m *Metadata) []byte {
 	// 3 marker + 4 timestamp + 4 nextFetch + 1 flags + 2 channel count + per-channel data
 	size := MarkerSize + 4 + 4 + 1 + 2
@@ -153,6 +164,9 @@ func SerializeMetadata(m *Metadata) []byte {
 	var flags byte
 	if m.TelegramLoggedIn {
 		flags |= 0x01
+	}
+	if m.ChatAvailable {
+		flags |= 0x02
 	}
 	buf[off] = flags
 	off++
@@ -188,7 +202,27 @@ func SerializeMetadata(m *Metadata) []byte {
 	return buf
 }
 
+// ChatAvailableFromBlock0 reads the ChatAvailable advertisement (flags bit
+// 0x02) from metadata block 0 alone — no need to fetch or verify the rest of the
+// metadata. The flags byte sits at a fixed offset (marker+timestamp+nextFetch)
+// in every metadata format, so block 0 is enough. ok is false if block 0 is too
+// short to contain it. This is an optimization hint only: it lets a client skip
+// the (retry-prone) ChatInfo probe on a server that advertises no messenger; the
+// authoritative, signed capability check is still ChatInfo.
+func ChatAvailableFromBlock0(block0 []byte) (available, ok bool) {
+	const flagsOff = MarkerSize + 4 + 4 // marker(3) + timestamp(4) + nextFetch(4)
+	if len(block0) <= flagsOff {
+		return false, false
+	}
+	return block0[flagsOff]&0x02 != 0, true
+}
+
 // ParseMetadata decodes metadata from concatenated channel 0 block data.
+//
+// New servers may embed an extended header in the Marker + Timestamp
+// fields of the same wire format — see PeekExtendedHeader for the magic
+// check. This parser ignores those fields by design; clients that care
+// about the embedded block_count / hash check them explicitly.
 func ParseMetadata(data []byte) (*Metadata, error) {
 	// Minimum: marker(3) + timestamp(4) + nextFetch(4) + flags(1) + count(2) = 14
 	if len(data) < MarkerSize+4+4+1+2 {
@@ -209,6 +243,7 @@ func ParseMetadata(data []byte) (*Metadata, error) {
 	flags := data[off]
 	off++
 	m.TelegramLoggedIn = flags&0x01 != 0
+	m.ChatAvailable = flags&0x02 != 0
 
 	count := binary.BigEndian.Uint16(data[off:])
 	off += 2
@@ -488,19 +523,43 @@ func DecodeTitlesData(data []byte) (map[string]string, error) {
 // DecompressMessages decompresses data produced by CompressMessages.
 // Reads the 1-byte header to determine the compression type.
 func DecompressMessages(data []byte) ([]byte, error) {
+	return DecompressMessagesLimited(data, 0)
+}
+
+// DecompressMessagesLimited is DecompressMessages with a cap on the inflated
+// output (maxOut <= 0 means unbounded). A caller that decompresses data from an
+// untrusted source must pass a sane cap: deflate expands up to ~1000x, so a
+// small ciphertext can otherwise inflate into a memory-exhausting "zip bomb".
+func DecompressMessagesLimited(data []byte, maxOut int) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty compressed data")
 	}
 
 	switch data[0] {
 	case compressionNone:
-		return data[1:], nil
+		body := data[1:]
+		if maxOut > 0 && len(body) > maxOut {
+			return nil, fmt.Errorf("decompress: %d bytes over cap %d", len(body), maxOut)
+		}
+		return body, nil
 	case compressionDeflate:
 		r := flate.NewReader(bytes.NewReader(data[1:]))
 		defer r.Close()
-		out, err := io.ReadAll(r)
+		if maxOut <= 0 {
+			out, err := io.ReadAll(r)
+			if err != nil {
+				return nil, fmt.Errorf("deflate decompress: %w", err)
+			}
+			return out, nil
+		}
+		// Read one byte past the cap so an over-limit stream is detected rather
+		// than silently truncated.
+		out, err := io.ReadAll(io.LimitReader(r, int64(maxOut)+1))
 		if err != nil {
 			return nil, fmt.Errorf("deflate decompress: %w", err)
+		}
+		if len(out) > maxOut {
+			return nil, fmt.Errorf("decompress: output exceeds cap %d", maxOut)
 		}
 		return out, nil
 	default:

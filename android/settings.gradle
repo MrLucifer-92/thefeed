@@ -11,6 +11,12 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Local flatDir for the gomobile-generated AAR. The file is
+        // produced by `make android-bind` (gomobile bind -target=android
+        // -o android/app/libs/mobile.aar ./mobile).
+        flatDir {
+            dirs "$rootDir/app/libs"
+        }
     }
 }
 

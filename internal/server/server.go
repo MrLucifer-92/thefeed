@@ -3,9 +3,11 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/ecdh"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,27 +16,49 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	ListenAddr    string
-	Domain        string
-	Passphrase    string
-	ChannelsFile  string
-	XAccountsFile string
-	XRSSInstances string
-	MaxPadding    int
-	MsgLimit      int  // max messages per channel (0 = default 15)
-	NoTelegram    bool // if true, fetch public channels without Telegram login
-	AllowManage   bool // if true, remote channel management and sending via DNS is allowed
-	Debug         bool // if true, log every decoded DNS query
+	ListenAddr          string
+	Domain              string   // main domain; canonical for relay path derivation
+	ExtraDomains        []string // additional sub-domains the server also answers feed queries on
+	Passphrase          string
+	DataDir             string // server state dir; holds the signing key
+	ChannelsFile        string
+	PrivateChannelsFile string // optional: invite links for private channels
+	XAccountsFile       string
+	XRSSInstances       string
+	MaxPadding          int
+	MsgLimit            int  // max messages per channel (0 = default 15)
+	NoTelegram          bool // if true, fetch public channels without Telegram login
+	AllowManage         bool // if true, remote channel management and sending via DNS is allowed
+	Debug               bool // if true, log every decoded DNS query
 	// DNSMediaEnabled toggles the slow DNS-relay path. When false the
 	// server still ingests media bytes (so other relays can serve them)
 	// but the wire-format DNS flag is unset for clients.
 	DNSMediaEnabled     bool
-	DNSMediaMaxSize     int64  // per-file cap for the DNS relay (0 = no cap)
-	DNSMediaCacheTTL    int    // DNS-relay TTL in minutes
-	DNSMediaCompression string // DNS-relay compression: none|gzip|deflate
+	DNSMediaMaxSize     int64         // per-file cap for the DNS relay (0 = no cap)
+	DNSMediaCacheTTL    int           // DNS-relay TTL in minutes
+	DNSMediaCompression string        // DNS-relay compression: none|gzip|deflate
 	FetchInterval       time.Duration // 0 = default 10m; floor enforced by main
 	GitHubRelay         GitHubRelayConfig
 	Telegram            TelegramConfig
+
+	// Chat (standalone messenger). Configured when ChatDomains is non-empty;
+	// the domains are dedicated chat sub-domains, distinct from the feed
+	// domains. Zero limits fall back to protocol defaults.
+	ChatDomains        []string
+	ChatEnabled        bool // serve chat (default true when domains set); false advertises chat-but-disabled
+	ChatSendPerHour    int
+	ChatInboxCap       int
+	ChatPerPairCap     int
+	ChatMaxMsgBytes    int
+	ChatTTLHours       int // inbox-message TTL (hours)
+	ChatAccountTTLDays int // delete idle accounts after N days (0 = never)
+	ChatMaxAccounts    int // cap on stored accounts (0 = unlimited)
+	// ChatSyncSeconds controls durability vs throughput for the chat store.
+	// 0 = fsync every committed message (max durability, lowest throughput).
+	// N>0 = flush to disk every N seconds instead (much higher throughput; a
+	// crash can lose up to ~N seconds of just-received messages — acceptable
+	// since chat is E2E and senders can resend).
+	ChatSyncSeconds int
 }
 
 // GitHubRelayConfig configures the GitHub fast relay. Active() requires
@@ -59,6 +83,7 @@ type Server struct {
 	feed             *Feed
 	reader           *TelegramReader // nil when --no-telegram
 	telegramChannels []string
+	privateInvites   []string // resolved invite hashes (post-parse)
 	xAccounts        []string
 }
 
@@ -72,15 +97,41 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load X accounts: %w", err)
 	}
-
-	if len(channels) == 0 && len(xAccounts) == 0 {
-		return nil, fmt.Errorf("no channels configured in %s and no X accounts configured in %s", cfg.ChannelsFile, cfg.XAccountsFile)
+	var privateInvites []string
+	if cfg.PrivateChannelsFile != "" {
+		privateInvites, err = LoadPrivateInvites(cfg.PrivateChannelsFile)
+		if err != nil {
+			return nil, fmt.Errorf("load private channels: %w", err)
+		}
 	}
 
-	log.Printf("[server] loaded %d Telegram channels and %d X accounts", len(channels), len(xAccounts))
+	if len(channels) == 0 && len(xAccounts) == 0 && len(privateInvites) == 0 {
+		return nil, fmt.Errorf("no channels configured in %s, no private invites in %s, and no X accounts in %s",
+			cfg.ChannelsFile, cfg.PrivateChannelsFile, cfg.XAccountsFile)
+	}
 
-	feed := NewFeed(append(append([]string{}, channels...), prefixXAccounts(xAccounts)...))
-	return &Server{cfg: cfg, feed: feed, telegramChannels: channels, xAccounts: xAccounts}, nil
+	log.Printf("[server] loaded %d Telegram public channels, %d private invites, %d X accounts",
+		len(channels), len(privateInvites), len(xAccounts))
+
+	// Feed slot order: public Telegram, then private Telegram, then X.
+	// Private channels use the short hash-derived ID (privateChannelID)
+	// so caches stay stable across file reorders without bloating the
+	// DNS metadata payload. Display title is set later via
+	// SetChannelDisplayName once the channel is resolved.
+	allChannelNames := append([]string{}, channels...)
+	for _, hash := range privateInvites {
+		allChannelNames = append(allChannelNames, privateChannelID(hash))
+	}
+	allChannelNames = append(allChannelNames, prefixXAccounts(xAccounts)...)
+	feed := NewFeed(allChannelNames)
+
+	return &Server{
+		cfg:              cfg,
+		feed:             feed,
+		telegramChannels: channels,
+		privateInvites:   privateInvites,
+		xAccounts:        xAccounts,
+	}, nil
 }
 
 // Run starts both the DNS server and the Telegram reader.
@@ -88,6 +139,90 @@ func (s *Server) Run(ctx context.Context) error {
 	queryKey, responseKey, err := protocol.DeriveKeys(s.cfg.Passphrase)
 	if err != nil {
 		return fmt.Errorf("derive keys: %w", err)
+	}
+
+	// Load (or generate) the server signing key and enable ExtraBlock
+	// signing so clients that pin the public key can verify feed content.
+	signKey, err := LoadOrCreateServerKey(s.cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("server signing key: %w", err)
+	}
+	s.feed.SetSigningKey(signKey)
+	log.Printf("[server] signing public key (sk=): %s", ServerPublicKeyString(signKey))
+
+	// Chat: dedicated sub-domains, x25519 enc key, bbolt account store, and
+	// the signed ChatInfo capability payload on the feed metadata path. When
+	// domains are configured the metadata bit advertises chat (so clients
+	// don't waste a ChatInfo probe on chatless servers); ChatInfo.Enabled
+	// reflects whether it is actually on.
+	var chat *ChatService
+	if len(s.cfg.ChatDomains) > 0 {
+		s.feed.SetChatAvailable(true)
+		if s.cfg.ChatEnabled {
+			ek, err := LoadOrCreateServerEncKey(s.cfg.DataDir)
+			if err != nil {
+				return fmt.Errorf("chat enc key: %w", err)
+			}
+			limits := protocol.DefaultChatLimits()
+			if s.cfg.ChatSendPerHour > 0 {
+				limits.SendPerHour = uint16(s.cfg.ChatSendPerHour)
+			}
+			if s.cfg.ChatInboxCap > 0 {
+				limits.InboxCap = uint16(s.cfg.ChatInboxCap)
+			}
+			if s.cfg.ChatPerPairCap > 0 {
+				limits.PerPairCap = uint16(s.cfg.ChatPerPairCap)
+			}
+			if s.cfg.ChatMaxMsgBytes > 0 {
+				limits.MaxMsgBytes = uint16(s.cfg.ChatMaxMsgBytes)
+			}
+			if s.cfg.ChatTTLHours > 0 {
+				limits.TTLHours = uint16(s.cfg.ChatTTLHours)
+			}
+			store, err := OpenChatStore(filepath.Join(s.cfg.DataDir, "chat.db"), limits)
+			if err != nil {
+				return fmt.Errorf("chat store: %w", err)
+			}
+			defer store.Close()
+			store.SetMaxAccounts(s.cfg.ChatMaxAccounts)
+			if s.cfg.ChatAccountTTLDays > 0 {
+				store.SetAccountTTL(time.Duration(s.cfg.ChatAccountTTLDays) * 24 * time.Hour)
+			}
+			syncDesc := "every-commit"
+			if s.cfg.ChatSyncSeconds > 0 {
+				store.EnablePeriodicSync(time.Duration(s.cfg.ChatSyncSeconds) * time.Second)
+				go store.RunSync(ctx)
+				syncDesc = fmt.Sprintf("%ds", s.cfg.ChatSyncSeconds)
+			}
+			chat = NewChatService(store, ek, queryKey, limits, s.cfg.ChatDomains)
+			s.feed.SetChatInfoPayload(protocol.EncodeChatInfo(chat.Info()))
+			go chat.RunSweeper(ctx)
+			// Periodic ek rotation: persist the new key, then re-sign/publish
+			// ChatInfo so clients adopt it. Limits the blast radius of an ek
+			// compromise to one rotation window (forward secrecy at that grain).
+			dataDir := s.cfg.DataDir
+			chat.SetEkPersist(func(k *ecdh.PrivateKey) error { return SaveServerEncKey(dataDir, k) })
+			go chat.RunEkRotation(ctx, func() {
+				s.feed.SetChatInfoPayload(protocol.EncodeChatInfo(chat.Info()))
+			})
+			acctTTL := "never"
+			if s.cfg.ChatAccountTTLDays > 0 {
+				acctTTL = fmt.Sprintf("%dd", s.cfg.ChatAccountTTLDays)
+			}
+			log.Printf("[server] chat enabled on %s (inbox=%d per-pair=%d send/h=%d msg=%dB msg-ttl=%dh account-ttl=%s max-accounts=%d sync=%s)",
+				strings.Join(s.cfg.ChatDomains, ", "), limits.InboxCap, limits.PerPairCap,
+				limits.SendPerHour, limits.MaxMsgBytes, limits.TTLHours, acctTTL, s.cfg.ChatMaxAccounts, syncDesc)
+		} else {
+			// Configured but turned off: advertise a disabled ChatInfo so
+			// clients show "messenger disabled by server" rather than probing.
+			s.feed.SetChatInfoPayload(protocol.EncodeChatInfo(protocol.ChatInfo{
+				MinVersion: protocol.ChatProtocolVersion,
+				MaxVersion: protocol.ChatProtocolVersion,
+				Enabled:    false,
+				Limits:     protocol.DefaultChatLimits(),
+			}))
+			log.Printf("[server] chat configured on %s but DISABLED (--chat-enabled=false)", strings.Join(s.cfg.ChatDomains, ", "))
+		}
 	}
 
 	SetMediaDebugLogs(s.cfg.Debug)
@@ -145,7 +280,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Handle login-only mode
 	if s.cfg.Telegram.LoginOnly {
-		reader := NewTelegramReader(s.cfg.Telegram, s.telegramChannels, s.feed, 15, 1)
+		reader := NewTelegramReader(s.cfg.Telegram, s.telegramChannels, s.privateInvites, s.feed, 15, 1)
 		return reader.Run(ctx)
 	}
 
@@ -155,8 +290,8 @@ func (s *Server) Run(ctx context.Context) error {
 		if msgLimit <= 0 {
 			msgLimit = 15
 		}
-		if len(s.telegramChannels) > 0 {
-			reader := NewTelegramReader(s.cfg.Telegram, s.telegramChannels, s.feed, msgLimit, 1)
+		if len(s.telegramChannels) > 0 || len(s.privateInvites) > 0 {
+			reader := NewTelegramReader(s.cfg.Telegram, s.telegramChannels, s.privateInvites, s.feed, msgLimit, 1)
 			reader.SetFetchInterval(s.cfg.FetchInterval)
 			s.reader = reader
 			channelCtl = reader
@@ -196,7 +331,8 @@ func (s *Server) Run(ctx context.Context) error {
 		if msgLimit <= 0 {
 			msgLimit = 15
 		}
-		xReader = NewXPublicReader(s.xAccounts, s.feed, msgLimit, len(s.telegramChannels)+1, s.cfg.XRSSInstances)
+		// X channel numbers start after all Telegram channels (public + private).
+		xReader = NewXPublicReader(s.xAccounts, s.feed, msgLimit, len(s.telegramChannels)+len(s.privateInvites)+1, s.cfg.XRSSInstances)
 		xReader.SetFetchInterval(s.cfg.FetchInterval)
 		go func() {
 			log.Println("[x] reader goroutine started")
@@ -215,6 +351,15 @@ func (s *Server) Run(ctx context.Context) error {
 		maxPad = protocol.DefaultMaxPadding
 	}
 	dnsServer := NewDNSServer(s.cfg.ListenAddr, s.cfg.Domain, s.feed, queryKey, responseKey, maxPad, s.reader, s.cfg.AllowManage, s.cfg.ChannelsFile, s.xAccounts, s.cfg.Debug)
+	dnsServer.SetExtraDomains(s.cfg.ExtraDomains)
+	if err := dnsServer.SetReportFile(filepath.Join(s.cfg.DataDir, "dns_hourly.jsonl")); err != nil {
+		log.Printf("[server] report file disabled: %v", err)
+	}
+	if chat != nil {
+		if err := dnsServer.SetChatService(chat); err != nil {
+			return fmt.Errorf("chat domains: %w", err)
+		}
+	}
 	if channelCtl != nil {
 		dnsServer.SetChannelRefresher(channelCtl)
 	}

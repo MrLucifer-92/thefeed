@@ -183,6 +183,92 @@ func TestE2E_VersionCheck_Success(t *testing.T) {
 	}
 }
 
+// /api/settings returns the new connection fields with the documented defaults.
+func TestE2E_Settings_ConnectionDefaults(t *testing.T) {
+	base, _ := startWebServer(t)
+	resp := getJSON(t, base+"/api/settings")
+	defer resp.Body.Close()
+	m := decodeJSON(t, resp)
+	if got, _ := m["queryMode"].(string); got != "single" {
+		t.Errorf("queryMode default = %v, want \"single\"", m["queryMode"])
+	}
+	if got, _ := m["rateLimit"].(float64); got != 10 {
+		t.Errorf("rateLimit default = %v, want 10", m["rateLimit"])
+	}
+	if got, _ := m["scatter"].(float64); got != 6 {
+		t.Errorf("scatter default = %v, want 6", m["scatter"])
+	}
+	if got, _ := m["timeout"].(float64); got != 10 {
+		t.Errorf("timeout default = %v, want 10", m["timeout"])
+	}
+}
+
+// POST then GET round-trips the connection fields through ProfileList.
+func TestE2E_Settings_ConnectionRoundTrip(t *testing.T) {
+	base, _ := startWebServer(t)
+	body := `{"queryMode":"double","rateLimit":12,"scatter":4,"timeout":7}`
+	resp := postJSON(t, base+"/api/settings", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("POST /api/settings: status=%d", resp.StatusCode)
+	}
+	resp2 := getJSON(t, base+"/api/settings")
+	defer resp2.Body.Close()
+	m := decodeJSON(t, resp2)
+	if got, _ := m["queryMode"].(string); got != "double" {
+		t.Errorf("queryMode = %v, want \"double\"", m["queryMode"])
+	}
+	if got, _ := m["rateLimit"].(float64); got != 12 {
+		t.Errorf("rateLimit = %v, want 12", m["rateLimit"])
+	}
+	if got, _ := m["scatter"].(float64); got != 4 {
+		t.Errorf("scatter = %v, want 4", m["scatter"])
+	}
+	if got, _ := m["timeout"].(float64); got != 7 {
+		t.Errorf("timeout = %v, want 7", m["timeout"])
+	}
+}
+
+// /api/settings round-trips resolverCacheShare. Default is true (feature
+// on); explicit opt-out must persist as false.
+func TestE2E_Settings_ResolverCacheShareToggle(t *testing.T) {
+	base, _ := startWebServer(t)
+
+	resp := getJSON(t, base+"/api/settings")
+	defer resp.Body.Close()
+	m := decodeJSON(t, resp)
+	if got, ok := m["resolverCacheShare"].(bool); !ok || !got {
+		t.Errorf("default resolverCacheShare = %v, want true", m["resolverCacheShare"])
+	}
+
+	r2 := postJSON(t, base+"/api/settings", `{"resolverCacheShare":false}`)
+	r2.Body.Close()
+
+	resp2 := getJSON(t, base+"/api/settings")
+	defer resp2.Body.Close()
+	m2 := decodeJSON(t, resp2)
+	if got, _ := m2["resolverCacheShare"].(bool); got {
+		t.Errorf("after opt-out: resolverCacheShare = %v, want false", m2["resolverCacheShare"])
+	}
+}
+
+// Only "single"/"double" pass validation; invalid input leaves the value untouched.
+func TestE2E_Settings_InvalidQueryModeRejected(t *testing.T) {
+	base, _ := startWebServer(t)
+	// First set a known good value.
+	r1 := postJSON(t, base+"/api/settings", `{"queryMode":"double"}`)
+	r1.Body.Close()
+	// Then try to corrupt it.
+	r2 := postJSON(t, base+"/api/settings", `{"queryMode":"junk"}`)
+	r2.Body.Close()
+	resp := getJSON(t, base+"/api/settings")
+	defer resp.Body.Close()
+	m := decodeJSON(t, resp)
+	if got, _ := m["queryMode"].(string); got != "double" {
+		t.Errorf("queryMode = %v, want unchanged \"double\"", m["queryMode"])
+	}
+}
+
 func TestE2E_SettingsPage_HasVersionControls(t *testing.T) {
 	base, _ := startWebServer(t)
 
