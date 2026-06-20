@@ -136,7 +136,8 @@ function openSidebar() {
 // foreign state and never clear chat-open, leaving the user stuck in a channel.
 // Direct removal always returns to the list.
 function feedBack() {
-  openSidebar();
+  if (viewingSaved) closeSavedMessages();
+  else openSidebar();
 }
 window.feedBack = feedBack;
 window.addEventListener('popstate', function () {

@@ -515,7 +515,7 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .sm-card-time { font-family: var(--font-mono, monospace); font-size: 10px; color: var(--text-dim); flex-shrink: 0; direction: ltr; opacity: .7; }
 
 /* Action buttons (hover-revealed) */
-.sm-card-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.sm-card-actions { display: flex; gap: 2px; flex-shrink: 0; margin-inline-start: auto; }
 .sm-action-btn {
   width: 28px;
   height: 28px;
@@ -536,6 +536,7 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .sm-action-btn:hover { background: var(--hover); color: var(--text); }
 .sm-action-btn.pin.on { color: var(--accent); opacity: 1; }
 .sm-action-btn.pin:hover { color: var(--accent); }
+.sm-action-btn.copy:hover { color: var(--accent); }
 .sm-action-btn.del:hover { background: rgba(229,57,53,.1); color: var(--error); }
 .sm-action-btn svg { width: 15px; height: 15px; }
 @media (hover: none) { .sm-action-btn { opacity: .6; } }
@@ -546,6 +547,7 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
   line-height: 1.65;
   color: var(--text);
   word-break: break-word;
+  white-space: pre-wrap;
   margin: 0 0 6px;
 }
 .sm-card-text a { color: var(--accent); text-decoration: none; }
@@ -612,6 +614,14 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .sm-dl-btn:hover { background: var(--hover); border-color: var(--text-dim); }
 .sm-dl-btn svg { width: 13px; height: 13px; }
 
+/* Album grid for multiple images */
+.sm-album { display: grid; gap: 2px; max-width: 380px; margin-bottom: 8px; border-radius: 8px; overflow: hidden; }
+.sm-album-2 { grid-template-columns: 1fr 1fr; }
+.sm-album-3 { grid-template-columns: 1fr 1fr; }
+.sm-album-3 .media-card:first-child { grid-row: 1 / 3; }
+.sm-album .media-card { margin-bottom: 0; max-width: none; }
+.sm-album .media-img { border-radius: 0; width: 100%; height: 100%; object-fit: cover; max-height: 300px; }
+
 /* Persisted media inside cards */
 .sm-card .media-card { position: relative; max-width: 380px; margin-bottom: 8px; }
 .sm-card .media-img,
@@ -624,6 +634,7 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
   background: #000;
   border-radius: 8px;
 }
+.saved-media-open { cursor: zoom-in; }
 .saved-media-save {
   position: absolute;
   bottom: 8px;

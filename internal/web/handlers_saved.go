@@ -41,9 +41,10 @@ func (s *Server) handleSavedList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSavedCount(w http.ResponseWriter, r *http.Request) {
+	count, unseen := s.savedCountAndUnseen()
 	writeJSON(w, map[string]any{
-		"count":  s.savedCount(),
-		"unseen": s.savedHasUnseen(),
+		"count":  count,
+		"unseen": unseen,
 	})
 }
 
@@ -225,6 +226,15 @@ func (s *Server) handleSavedFromChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(text) > savedNoteMaxBytes {
 		text = text[:savedNoteMaxBytes]
+	}
+	// Dedup: if an identical chat message already exists, remove it (toggle)
+	if existing := s.savedFindChat(text, strings.TrimSpace(req.ContactName)); existing != "" {
+		if _, err := s.savedDeleteAndCleanup(existing); err != nil {
+			http.Error(w, "delete failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "toggled": "removed", "id": existing})
+		return
 	}
 	media := req.Media
 	for i := range media {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,13 @@ type mediaDiskCache struct {
 	// (header‖mime‖body) at rest with AES-256-GCM. Set only on the savedMedia
 	// store; the ephemeral mediaCache leaves it nil (plaintext).
 	crypto *savedCrypto
+
+	// maxBytes is the byte budget (0 = unlimited). When exceeded after a Put,
+	// the oldest entries are evicted until total <= 90% of maxBytes.
+	maxBytes int64
+	// curBytes is the running total of file sizes on disk. -1 means unknown
+	// (scan needed). Updated on Put/Remove/Cleanup/Clear.
+	curBytes int64
 }
 
 // setCrypto swaps the at-rest crypto handle under c.mu so it doesn't race the
@@ -72,11 +80,98 @@ func newMediaDiskCache(dir string, ttl time.Duration) (*mediaDiskCache, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &mediaDiskCache{dir: dir, ttl: ttl}, nil
+	return &mediaDiskCache{dir: dir, ttl: ttl, curBytes: -1}, nil
 }
 
 func (c *mediaDiskCache) keyFile(size int64, crc uint32) string {
 	return filepath.Join(c.dir, fmt.Sprintf("%d_%08x%s", size, crc, mediaCacheFileExt))
+}
+
+// SetMaxBytes sets the byte budget and enforces it immediately.
+// 0 means unlimited.
+func (c *mediaDiskCache) SetMaxBytes(n int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.maxBytes = n
+	if n > 0 {
+		c.enforceBudgetLocked()
+	}
+}
+
+// Size returns the total bytes on disk. Scans once if unknown.
+func (c *mediaDiskCache) Size() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.curBytes < 0 {
+		c.scanSizeLocked()
+	}
+	return c.curBytes
+}
+
+// scanSizeLocked computes curBytes from the directory listing.
+func (c *mediaDiskCache) scanSizeLocked() {
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		c.curBytes = 0
+		return
+	}
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), mediaCacheFileExt) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+	}
+	c.curBytes = total
+}
+
+// enforceBudgetLocked evicts oldest entries until total <= 90% of maxBytes.
+func (c *mediaDiskCache) enforceBudgetLocked() {
+	if c.maxBytes <= 0 {
+		return
+	}
+	if c.curBytes < 0 {
+		c.scanSizeLocked()
+	}
+	if c.curBytes <= c.maxBytes {
+		return
+	}
+	// 90% low-water mark (hysteresis)
+	target := c.maxBytes * 9 / 10
+
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		return
+	}
+	type fileEntry struct {
+		name  string
+		size  int64
+		mtime time.Time
+	}
+	var files []fileEntry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), mediaCacheFileExt) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileEntry{name: e.Name(), size: info.Size(), mtime: info.ModTime()})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mtime.Before(files[j].mtime) })
+	for _, f := range files {
+		if c.curBytes <= target {
+			break
+		}
+		if os.Remove(filepath.Join(c.dir, f.name)) == nil {
+			c.curBytes -= f.size
+		}
+	}
 }
 
 // Get returns the cached body and mime type if present and not expired.
@@ -91,7 +186,13 @@ func (c *mediaDiskCache) Get(size int64, crc uint32) (body []byte, mime string, 
 		return nil, "", false
 	}
 	if c.ttl > 0 && time.Since(info.ModTime()) > c.ttl {
-		_ = os.Remove(path)
+		if os.Remove(path) == nil {
+			c.mu.Lock()
+			if c.curBytes >= info.Size() {
+				c.curBytes -= info.Size()
+			}
+			c.mu.Unlock()
+		}
 		return nil, "", false
 	}
 	data, err := os.ReadFile(path)
@@ -171,19 +272,40 @@ func (c *mediaDiskCache) Put(size int64, crc uint32, body []byte, mime string) e
 	}
 
 	path := c.keyFile(size, crc)
+	newSize := int64(len(framed))
+
+	// Track the old file size for the delta.
+	var oldSize int64
+	if info, err := os.Stat(path); err == nil {
+		oldSize = info.Size()
+	}
+
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, framed, 0o600); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if c.curBytes >= 0 {
+		c.curBytes += newSize - oldSize
+	}
+	c.enforceBudgetLocked()
+	return nil
 }
 
 // Remove deletes the cache entry for (size, crc) if it exists.
 func (c *mediaDiskCache) Remove(size int64, crc uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_ = os.Remove(c.keyFile(size, crc))
+	path := c.keyFile(size, crc)
+	if info, err := os.Stat(path); err == nil {
+		if os.Remove(path) == nil && c.curBytes >= info.Size() {
+			c.curBytes -= info.Size()
+		}
+	}
 }
 
 // Cleanup removes entries older than ttl. Returns the count removed.
@@ -210,6 +332,9 @@ func (c *mediaDiskCache) Cleanup() int {
 		if now.Sub(info.ModTime()) > c.ttl {
 			if os.Remove(filepath.Join(c.dir, e.Name())) == nil {
 				removed++
+				if c.curBytes >= info.Size() {
+					c.curBytes -= info.Size()
+				}
 			}
 		}
 	}
@@ -233,5 +358,6 @@ func (c *mediaDiskCache) Clear() int {
 			removed++
 		}
 	}
+	c.curBytes = 0
 	return removed
 }

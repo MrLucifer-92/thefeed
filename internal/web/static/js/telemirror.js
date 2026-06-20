@@ -2,6 +2,7 @@
   var tmChannels = [];
   var tmActive = '';
   var tmPostText = {};    // pid -> plaintext (avoids huge data-text attrs)
+  var tmPostMedia = {};   // pid -> media array (for persisting images on save)
   var tmLastFetchedAt = {}; // username (lower) -> last successful fetch ms
 
   try {
@@ -605,6 +606,7 @@
     // copy button doesn't have to embed huge multiline strings into a
     // data-text attribute (which broke rendering on long Persian posts).
     tmPostText = {};
+    tmPostMedia = {};
 
     for (var i = 0; i < posts.length; i++) {
       var p = posts[i];
@@ -612,6 +614,7 @@
       var plain = tmPostPlainText(p);
       var pid = 'tmp_' + i;
       if (plain) tmPostText[pid] = plain;
+      if (p.media && p.media.length) tmPostMedia[pid] = p.media;
 
       // p.id looks like "channel/12345" — show only the numeric part.
       var msgNum = (p.id || '').split('/').pop();
@@ -770,7 +773,11 @@
       .replace(/<\/(p|div|li)>/gi, '\n');
     var tmp = document.createElement('div');
     tmp.innerHTML = s;
-    return (tmp.textContent || tmp.innerText || '').trim();
+    var raw = (tmp.textContent || tmp.innerText || '');
+    // Collapse HTML-source indentation: trim leading spaces per line,
+    // collapse 3+ consecutive newlines to 2.
+    raw = raw.replace(/^[ \t]+/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+    return raw;
   }
 
   // Render one media tile based on its type.
@@ -936,10 +943,48 @@
     if (!text && !pid) return;
     try {
       if (btn) { btn.disabled = true; }
+      var media = [];
+      var postMedia = (pid && tmPostMedia[pid]) || [];
+      for (var mi = 0; mi < postMedia.length; mi++) {
+        if (postMedia[mi].type === 'photo' && postMedia[mi].thumb) {
+          try {
+            var imgUrl = postMedia[mi].thumb;
+            var pd = null;
+            // Browser-side: fetch image directly and upload blob.
+            try {
+              var imgResp = await fetch(imgUrl, { referrerPolicy: 'no-referrer' });
+              if (imgResp.ok) {
+                var blob = await imgResp.blob();
+                if (blob.size > 0) {
+                  var up = await fetch('/api/saved/media/upload-blob', {
+                    method: 'POST',
+                    headers: { 'Content-Type': blob.type || 'image/jpeg' },
+                    body: blob
+                  });
+                  if (up.ok) pd = await up.json();
+                }
+              }
+            } catch (e) { /* CORS or network — try server-side */ }
+            // Fallback: ask the server to fetch it.
+            if (!pd) {
+              var pr = await fetch('/api/saved/media/persist-tm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: imgUrl })
+              });
+              if (pr.ok) pd = await pr.json();
+            }
+            if (pd && pd.size) {
+              media.push({ tag: '[IMAGE]', size: pd.size, crc: pd.crc, persisted: true });
+            }
+          } catch (e) { /* skip this image */ }
+        }
+      }
       var payload = {
         text: text || '',
         contactName: channelUsername || tmActive,
-        tmSource: tmSource || ''
+        tmSource: tmSource || '',
+        media: media
       };
       var r = await fetch('/api/saved/from-chat', {
         method: 'POST',

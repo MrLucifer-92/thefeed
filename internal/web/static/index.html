@@ -125,13 +125,13 @@
         <input class="sidebar-search" id="channelSearch" type="text" data-i18n-ph="search" placeholder="Search..."
           oninput="filterChannels()">
       </div>
-      <div class="saved-channel-entry" id="savedChannelBtn" role="button" tabindex="0"
-        onclick="openSavedMessages()" aria-label="Saved Messages">
-        <span class="saved-entry-icon" data-icon="bookmark"></span>
-        <span class="saved-entry-name" data-i18n="saved_messages">Saved Messages</span>
-        <span class="saved-badge" id="savedBadge" hidden></span>
-      </div>
       <div class="channel-list" id="channelList">
+        <div class="saved-channel-entry" id="savedChannelBtn" role="button" tabindex="0"
+          onclick="openSavedMessages()" aria-label="Saved Messages">
+          <span class="saved-entry-icon" data-icon="bookmark"></span>
+          <span class="saved-entry-name" data-i18n="saved_messages">Saved Messages</span>
+          <span class="saved-badge" id="savedBadge" hidden></span>
+        </div>
         <div style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px" data-i18n="no_channels">No
           channels yet</div>
       </div>
@@ -354,6 +354,8 @@
           onclick="switchSettingsTab('display')" data-i18n="settings_tab_display">Display</button>
         <button type="button" class="settings-tab" id="settingsTabBtnConnection"
           onclick="switchSettingsTab('connection')" data-i18n="settings_tab_connection">Connection</button>
+        <button type="button" class="settings-tab" id="settingsTabBtnStorage"
+          onclick="switchSettingsTab('storage')" data-i18n="settings_tab_storage">Storage</button>
         <button type="button" class="settings-tab" id="settingsTabBtnAbout" onclick="switchSettingsTab('about')"
           data-i18n="settings_tab_about">About</button>
       </div>
@@ -510,6 +512,29 @@
         </div>
       </div>
 
+      <!-- ===== Storage tab ===== -->
+      <div class="settings-panel" id="settingsPanelStorage" style="display:none">
+        <div style="padding:14px 0 10px;border-bottom:1px solid var(--border)">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+            <span style="font-size:15px;font-weight:600;color:var(--text)" data-i18n="storage_total">Total Cache</span>
+            <span id="storageTotalEl" style="font-size:15px;font-weight:600;color:var(--text)">—</span>
+          </div>
+        </div>
+        <div style="padding:14px 0 10px;border-bottom:1px solid var(--border)">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:14px;color:var(--text)" data-i18n="storage_budget">Budget</span>
+            <span style="display:flex;align-items:center;gap:8px">
+              <input type="text" inputmode="numeric" pattern="[0-9]*" id="storageBudgetInput" value="1024" dir="ltr"
+                style="width:64px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;text-align:center;-moz-appearance:textfield">
+              <span style="font-size:13px;color:var(--text-dim)">MB</span>
+              <button class="btn btn-primary btn-sm" onclick="saveCacheBudget()" data-i18n="apply" style="padding:6px 14px;font-size:13px">Apply</button>
+            </span>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px" data-i18n="storage_budget_min">Minimum 50 MB</div>
+        </div>
+        <div id="storageCacheList" style="margin-top:4px"></div>
+      </div>
+
       <!-- ===== About tab ===== -->
       <div class="settings-panel" id="settingsPanelAbout" style="display:none">
         <div class="settings-info-row" style="margin-top:0">
@@ -531,9 +556,6 @@
             style="flex:1">Source code</button>
           <button class="btn btn-flat btn-sm" onclick="closeSettings();openPrivacy()" data-i18n="privacy_policy"
             style="flex:1">Privacy</button>
-        </div>
-        <div class="settings-info-row" style="margin-top:14px">
-          <button class="btn btn-flat btn-sm" onclick="clearCache()" style="color:var(--danger,#e74c3c);width:100%"><span data-icon="delete"></span> <span data-i18n="clear_cache_btn">Clear Cache</span></button>
         </div>
       </div>
 

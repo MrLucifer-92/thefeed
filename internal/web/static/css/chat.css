@@ -679,6 +679,20 @@
   opacity: 1
 }
 
+.chat-msg-save {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 3px;
+  line-height: 0;
+  opacity: .6;
+  transition: opacity .15s;
+}
+.chat-msg-save .icon svg { width: 12px; height: 12px; }
+.chat-msg-save:hover { opacity: 1; }
+.chat-msg-save.saved { opacity: 1; color: var(--accent); }
+
 .chat-clearfix {
   clear: both
 }

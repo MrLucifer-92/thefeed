@@ -808,10 +808,18 @@ async function chatForwardToSaved(btn) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: text, contactName: contactName })
     });
-    if (typeof showToast === 'function') {
-      showToast(r.ok ? (t('saved_toast') || 'Forwarded to Saved') : (t('saved_save_failed') || 'Could not save'));
+    if (r.ok) {
+      var data = await r.json();
+      var wasRemoved = data && data.toggled === 'removed';
+      if (wasRemoved) btn.classList.remove('saved'); else btn.classList.add('saved');
+      if (typeof showToast === 'function') {
+        showToast(wasRemoved ? (t('unsaved_toast') || 'Removed from Saved') : (t('saved_toast') || 'Forwarded to Saved'));
+      }
+      if (typeof updateSavedBadge === 'function') updateSavedBadge();
+      if (typeof getAllSaved === 'function') getAllSaved().then(function(items) { if (typeof savedMessages !== 'undefined') savedMessages = items; });
+    } else {
+      if (typeof showToast === 'function') showToast(t('saved_save_failed') || 'Could not save');
     }
-    if (r.ok && typeof updateSavedBadge === 'function') updateSavedBadge();
   } catch (e) {
     if (typeof showToast === 'function') showToast(t('saved_save_failed') || 'Could not save');
   }

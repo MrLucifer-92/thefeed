@@ -133,6 +133,10 @@ type ProfileList struct {
 	Scatter   int     `json:"scatter,omitempty"`   // resolvers per block
 	Timeout   float64 `json:"timeout,omitempty"`   // DNS query timeout (s)
 
+	// CacheBudgetMB is the disk-cache byte budget in megabytes (0 = default 1024).
+	// Applies to media-cache and telemirror images combined. saved-media is exempt.
+	CacheBudgetMB int `json:"cacheBudgetMB,omitempty"`
+
 	// ResolverCacheShare gates the shared-resolver-cache feature. Pointer
 	// (not plain bool) so we can tell "user never set it" (nil → default
 	// on) apart from "user explicitly disabled" (false). New installs and
@@ -406,6 +410,11 @@ func New(dataDir string, port int, host string, password string) (*Server, error
 		s.savedMedia = savedMedia
 	}
 
+	// Apply cache budget from saved preferences.
+	if pl, plErr := s.loadProfiles(); plErr == nil && pl != nil {
+		s.applyCacheBudget(pl.CacheBudgetMB)
+	}
+
 	// Migrate per-profile resolvers into the shared bank on first run.
 	s.migrateResolverBank()
 
@@ -474,6 +483,9 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/update/github", s.handleGitHubUpdateCheck)
 	mux.HandleFunc("/api/update/download", s.handleUpdateDownload)
 	mux.HandleFunc("/api/cache/clear", s.handleClearCache)
+	mux.HandleFunc("/api/cache/stats", s.handleCacheStats)
+	mux.HandleFunc("/api/cache/clear-one", s.handleCacheClearOne)
+	mux.HandleFunc("/api/cache/budget", s.handleCacheBudget)
 	mux.HandleFunc("/api/bg-image", s.handleBgImage)
 	mux.HandleFunc("/api/resolvers/apply-saved", s.handleApplySavedResolvers)
 	mux.HandleFunc("/api/resolvers/active", s.handleActiveResolvers)
@@ -511,6 +523,8 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/saved/seen", s.handleSavedSeen)
 	mux.HandleFunc("/api/saved/media", s.handleSavedMedia)
 	mux.HandleFunc("/api/saved/media/persist", s.handleSavedMediaPersist)
+	mux.HandleFunc("/api/saved/media/persist-tm", s.handleSavedMediaPersistTm)
+	mux.HandleFunc("/api/saved/media/upload-blob", s.handleSavedMediaUploadBlob)
 	// Optional telemirror feature — see internal/telemirror/.
 	mux.HandleFunc("/api/telemirror/channels", s.telemirror.handleChannels)
 	mux.HandleFunc("/api/telemirror/channel/", s.telemirror.handleChannel)

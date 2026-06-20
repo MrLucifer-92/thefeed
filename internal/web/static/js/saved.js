@@ -44,6 +44,12 @@ function isSavedLocal(channelId, messageId) {
   for (var i = 0; i < savedMessages.length; i++) { if (savedMessages[i].channelId === channelId && savedMessages[i].messageId === messageId) return true; }
   return false;
 }
+function findSavedId(channelId, messageId) {
+  for (var i = 0; i < savedMessages.length; i++) {
+    if (savedMessages[i].channelId === channelId && savedMessages[i].messageId === messageId) return savedMessages[i].id;
+  }
+  return '';
+}
 async function persistSavedMedia(size, crc) {
   try { await fetch('/api/saved/media/persist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ size: size, crc: parseInt(crc, 16) }) }); } catch (e) {}
 }
@@ -170,9 +176,10 @@ function renderSavedView() {
   if (hasItems) {
     var lastDate = '';
     var dateLocale = lang === 'fa' ? 'fa-IR' : 'en-US';
+    var dateOpts = lang === 'fa' ? { year: 'numeric', month: 'long', day: 'numeric', calendar: 'persian' } : { year: 'numeric', month: 'long', day: 'numeric' };
     for (var i = 0; i < savedMessages.length; i++) {
       var rec = savedMessages[i];
-      var savedDate = new Date(rec.savedAt).toLocaleDateString(dateLocale, { month: 'short', day: 'numeric' });
+      var savedDate = new Date(rec.savedAt).toLocaleDateString(dateLocale, dateOpts);
       if (savedDate !== lastDate) {
         html += '<div class="sm-date-sep"><span>' + esc(savedDate) + '</span></div>';
         lastDate = savedDate;
@@ -295,6 +302,7 @@ function renderSavedItem(record) {
 
   // ── Media (persisted blobs, pending downloads) ───────────
   var mediaHtml = '';
+  var imageCards = [];
   var record_media = record.media || [];
   var captionText = renderText.replace(/^(\[(?:IMAGE|VIDEO|FILE|AUDIO|STICKER|GIF|CONTACT|LOCATION)\][^\n]*\n?)+/, '');
   for (var mi = 0; mi < record_media.length; mi++) {
@@ -302,9 +310,6 @@ function renderSavedItem(record) {
     var crcHex = (md.crc >>> 0).toString(16);
     if (md.persisted) {
       var src = '/api/saved/media?size=' + md.size + '&crc=' + crcHex;
-      // Download-to-device control for already-saved media. The bytes live in
-      // the (encrypted) saved-media store; this lets the user pull a copy out to
-      // their device's Downloads. download= gives it a sensible filename.
       var dlName = (record.kind === 'file' && record.fileName)
         ? record.fileName
         : (md.tag.replace(/[\[\]]/g, '').toLowerCase() || 'media') + '-' + md.size;
@@ -312,11 +317,10 @@ function renderSavedItem(record) {
         + 'title="' + escAttr(t('download') || 'Download') + '" aria-label="' + escAttr(t('download') || 'Download') + '">'
         + icon('download') + '</a>';
       if (md.tag === '[IMAGE]' || md.tag === '[STICKER]' || md.tag === '[GIF]') {
-        mediaHtml += '<div class="media-card"><img class="media-img" src="' + src + '" loading="lazy" alt="">' + dlBtn + '</div>';
+        imageCards.push('<div class="media-card"><img class="media-img saved-media-open" src="' + src + '" loading="lazy" alt="" onclick="savedMediaOpen(this)">' + dlBtn + '</div>');
       } else if (md.tag === '[VIDEO]') {
         mediaHtml += '<div class="media-card"><video class="media-video" src="' + src + '" controls preload="metadata"></video>' + dlBtn + '</div>';
       } else {
-        // Non-image persisted file — show sm-file-row with download button
         var extRaw = dlName.split('.').pop().toUpperCase().slice(0, 5) || 'FILE';
         var fIconCls = extRaw === 'PDF' ? 'pdf'
           : (extRaw === 'JPG' || extRaw === 'PNG' || extRaw === 'JPEG' || extRaw === 'WEBP' || extRaw === 'HEIC') ? 'img'
@@ -338,6 +342,14 @@ function renderSavedItem(record) {
     } else {
       mediaHtml += '<div class="saved-media-pending"><span class="saved-media-dl saved-media-dl-disabled">' + icon('download') + ' ' + md.tag + ' (' + formatBytes(md.size) + ')</span></div>';
     }
+  }
+  // Group images in a grid when there are multiple
+  if (imageCards.length > 1) {
+    var gridN = imageCards.length === 3 ? 3 : 2;
+    var gridCls = 'sm-album sm-album-' + gridN;
+    mediaHtml = '<div class="' + gridCls + '">' + imageCards.join('') + '</div>' + mediaHtml;
+  } else if (imageCards.length === 1) {
+    mediaHtml = imageCards[0] + mediaHtml;
   }
 
   // File without persisted blob — show filename tile if present
@@ -404,6 +416,9 @@ function renderSavedItem(record) {
     + '<div class="sm-card-actions">'
     + '<button class="sm-action-btn pin' + (isPinned ? ' on' : '') + '" data-action="pin" title="' + escAttr(isPinned ? (t('unpin') || 'Unpin') : (t('pin') || 'Pin')) + '">'
     + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>'
+    + '</button>'
+    + '<button class="sm-action-btn copy" data-action="copy" title="' + escAttr(t('copy') || 'Copy') + '">'
+    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
     + '</button>'
     + '<button class="sm-action-btn del" data-action="remove" title="' + escAttr(t('remove_from_saved') || 'Delete') + '">'
     + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>'
@@ -742,11 +757,11 @@ function jumpToTelemirrorPost(tmSource) {
     setTimeout(function () {
       var el = document.querySelector('.tm-post[data-post-id="' + cssEsc(tmSource) + '"]');
       if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.scrollIntoView({ behavior: 'auto', block: 'center' });
         el.classList.add('tm-post-highlight');
         setTimeout(function () { el.classList.remove('tm-post-highlight'); }, 2000);
       }
-    }, 1300);
+    }, 1500);
   }, 300);
 }
 
@@ -890,7 +905,8 @@ async function contextMenuSave(msgId) {
 async function contextMenuUnsave(msgId) {
   closeMsgContextMenu();
   var chName = channelName(selectedChannel);
-  var id = activeProfileId + '__' + chName + '__' + msgId;
+  var id = findSavedId(chName, msgId);
+  if (!id) return;
   try {
     await unsaveMessage(id);
   } catch (e) {
@@ -909,7 +925,8 @@ async function msgSaveToggle(msgId, btnEl) {
   var chName = channelName(selectedChannel);
   var alreadySaved = isSavedLocal(chName, msgId);
   if (alreadySaved) {
-    var id = activeProfileId + '__' + chName + '__' + msgId;
+    var id = findSavedId(chName, msgId);
+    if (!id) return;
     await unsaveMessage(id);
     getAllSaved().then(function(items) { savedMessages = items; });
     updateSavedBadge();
@@ -976,6 +993,12 @@ function initSavedMessages() {
     if (rb) {
       var w = rb.closest('.sm-card');
       if (w) removeSavedItem(w.getAttribute('data-saved-id'), rb);
+      return;
+    }
+    var cb = e.target.closest('[data-action="copy"]');
+    if (cb) {
+      var cw = cb.closest('.sm-card');
+      if (cw) copySavedText(cw.getAttribute('data-saved-id'));
       return;
     }
     var pb = e.target.closest('[data-action="pin"]');
@@ -1045,6 +1068,39 @@ function initSavedMessages() {
   });
 }
 
+function copySavedText(savedId) {
+  for (var i = 0; i < savedMessages.length; i++) {
+    if (savedMessages[i].id === savedId) {
+      var text = (savedMessages[i].text || '').replace(/^\[ME\]\n?/, '');
+      text = text.replace(/\[(?:IMAGE|VIDEO|FILE|AUDIO|STICKER|GIF|CONTACT|LOCATION)\][^\n]*/g, '').trim();
+      if (!text) { showToast(t('nothing_to_copy') || 'Nothing to copy'); return; }
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(function() {
+          showToast(t('copied') || 'Copied');
+        });
+      }
+      return;
+    }
+  }
+}
+
+function savedMediaOpen(img) {
+  var src = img.src || img.getAttribute('src');
+  if (!src) return;
+  if (typeof showImageLightbox === 'function') {
+    showImageLightbox(src, '');
+    return;
+  }
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;cursor:zoom-out';
+  overlay.onclick = function() { overlay.remove(); };
+  var im = document.createElement('img');
+  im.src = src;
+  im.style.cssText = 'max-width:95vw;max-height:95vh;object-fit:contain;border-radius:4px';
+  overlay.appendChild(im);
+  document.body.appendChild(overlay);
+}
+
 // Expose globals
 window.saveMessage = saveMessage;
 window.unsaveMessage = unsaveMessage;
@@ -1074,6 +1130,8 @@ window.savedModalToggleUnlockEye = savedModalToggleUnlockEye;
 window.savedBannerScrollToPinned = savedBannerScrollToPinned;
 window.savedUnpinAll = savedUnpinAll;
 window.clearSavedSearch = clearSavedSearch;
+window.copySavedText = copySavedText;
+window.savedMediaOpen = savedMediaOpen;
 
 // Auto-init on DOMContentLoaded
 if (document.readyState === 'loading') {

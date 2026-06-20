@@ -114,6 +114,21 @@ func (s *Server) savedHasUnseen() bool {
 	return false
 }
 
+// savedCountAndUnseen returns (count, unseen) from a single store load.
+func (s *Server) savedCountAndUnseen() (int, bool) {
+	s.savedMu.Lock()
+	defer s.savedMu.Unlock()
+	st := s.loadSaved()
+	unseen := false
+	for _, it := range st.Items {
+		if it.SavedAt > st.SeenAt {
+			unseen = true
+			break
+		}
+	}
+	return len(st.Items), unseen
+}
+
 // savedMarkSeen sets SeenAt to the newest item's savedAt, clearing the dot.
 func (s *Server) savedMarkSeen() error {
 	s.savedMu.Lock()
@@ -280,6 +295,20 @@ func (s *Server) savedSetPersisted(size int64, crc uint32) error {
 		return nil
 	}
 	return s.writeSaved(st)
+}
+
+// savedFindChat returns the ID of an existing kind:"chat" item with identical
+// text and contact, or "" if none exists. Used for toggle dedup.
+func (s *Server) savedFindChat(text, contact string) string {
+	s.savedMu.Lock()
+	defer s.savedMu.Unlock()
+	st := s.loadSaved()
+	for _, it := range st.Items {
+		if it.Kind == "chat" && it.Text == text && it.Nickname == contact {
+			return it.ID
+		}
+	}
+	return ""
 }
 
 // mediaTagRe matches the downloadable-media wire format embedded in message

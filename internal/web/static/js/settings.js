@@ -32,13 +32,14 @@ function openSettings() {
 }
 
 function switchSettingsTab(tab) {
-  var tabs = ['display', 'connection', 'about'];
+  var tabs = ['display', 'connection', 'storage', 'about'];
   tabs.forEach(function (name) {
     var btn = document.getElementById('settingsTabBtn' + name.charAt(0).toUpperCase() + name.slice(1));
     var panel = document.getElementById('settingsPanel' + name.charAt(0).toUpperCase() + name.slice(1));
     if (btn) btn.classList.toggle('active', name === tab);
     if (panel) panel.style.display = name === tab ? '' : 'none';
   });
+  if (tab === 'storage') loadCacheStats();
 }
 
 function toggleHelp(id) {
@@ -450,6 +451,97 @@ async function checkLatestVersion() {
     }
   }
 }
+// ===== STORAGE / CACHE BUDGET =====
+
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+var _storageLabelMap = {
+  'media': 'storage_media',
+  'telemirror': 'storage_telemirror',
+  'saved-media': 'storage_saved_media',
+  'messages': 'storage_messages',
+};
+var _storageIconMap = {
+  'media': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:22px;height:22px"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>',
+  'telemirror': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:22px;height:22px"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>',
+  'saved-media': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:22px;height:22px"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>',
+  'messages': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:22px;height:22px"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/></svg>',
+};
+var _storageColorMap = {
+  'media': '#3b82f6',
+  'telemirror': '#8b5cf6',
+  'saved-media': '#f59e0b',
+  'messages': '#10b981',
+};
+
+function loadCacheStats() {
+  fetch('/api/cache/stats').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+    if (!d) return;
+    var el = document.getElementById('storageTotalEl');
+    if (el) el.textContent = fmtBytes(d.total || 0);
+    var inp = document.getElementById('storageBudgetInput');
+    if (inp) inp.value = d.budgetMB || 1024;
+    var list = document.getElementById('storageCacheList');
+    if (!list) return;
+    var total = d.total || 1;
+    var html = '';
+    (d.caches || []).forEach(function (c) {
+      var canDelete = c.id !== 'saved-media';
+      var label = _storageLabelMap[c.id] ? t(_storageLabelMap[c.id]) : c.label;
+      var ico = _storageIconMap[c.id] || '';
+      var clr = _storageColorMap[c.id] || 'var(--text-dim)';
+      var pct = total > 0 ? Math.max(1, Math.round((c.bytes / total) * 100)) : 0;
+      if (c.bytes === 0) pct = 0;
+      html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">'
+        + '<div style="width:40px;height:40px;border-radius:10px;background:' + clr + '18;color:' + clr + ';display:flex;align-items:center;justify-content:center;flex-shrink:0">' + ico + '</div>'
+        + '<div style="flex:1;min-width:0">'
+        + '<div style="font-size:14px;color:var(--text);margin-bottom:3px">' + esc(label) + '</div>'
+        + '<div style="height:4px;border-radius:2px;background:var(--border);overflow:hidden"><div style="height:100%;width:' + pct + '%;background:' + clr + ';border-radius:2px"></div></div>'
+        + '</div>'
+        + '<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">'
+        + '<span dir="ltr" style="font-size:13px;color:var(--text-dim)">' + fmtBytes(c.bytes) + '</span>'
+        + (canDelete ? '<button class="btn btn-flat btn-sm" onclick="clearOneCache(\'' + escAttr(c.id) + '\')" style="color:var(--danger,#e74c3c);padding:4px 6px;font-size:11px;line-height:0">'
+          + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px"><polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>' : '')
+        + '</div></div>';
+    });
+    list.innerHTML = html;
+  }).catch(function () { });
+}
+
+function clearOneCache(which) {
+  fetch('/api/cache/clear-one', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ which: which })
+  }).then(function (r) {
+    if (r.ok) {
+      showToast(t('cache_cleared') || 'Cleared');
+      loadCacheStats();
+    }
+  }).catch(function () { });
+}
+
+function saveCacheBudget() {
+  var inp = document.getElementById('storageBudgetInput');
+  var mb = parseInt(inp && inp.value, 10);
+  if (!mb || mb < 50) { showToast(t('storage_budget_min') || 'Minimum 50 MB'); return; }
+  fetch('/api/cache/budget', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mb: mb })
+  }).then(function (r) {
+    if (r.ok) {
+      showToast(t('saved') || 'Saved');
+      loadCacheStats();
+    }
+  }).catch(function () { });
+}
+
 function toggleResolverBankInfo() {
   var panel = document.getElementById('resolverBankInfoPanel');
   var btn = document.getElementById('resolverBankInfoBtn');
