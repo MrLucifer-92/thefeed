@@ -138,8 +138,8 @@ function renderSavedView() {
       : esc(t('saved_locked_sub') || 'Content is sealed with AES-GCM and lives only on this device.');
     var gateHtml = '<div class="sm-saved-root"><div class="sm-gate">'
       + '<div class="sm-gate-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1" fill="currentColor"/></svg></div>'
-      + '<div class="sm-gate-title">' + gateTitle + '</div>'
-      + '<div class="sm-gate-sub">' + gateSub + '</div>'
+      + '<div class="sm-gate-title" dir="auto">' + gateTitle + '</div>'
+      + '<div class="sm-gate-sub" dir="auto">' + gateSub + '</div>'
       + '<div class="sm-gate-enc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>AES-GCM \xb7 Argon2id</div>';
     if (!isDeviceKeyLost) {
       gateHtml += '<div class="sm-pw-field">'
