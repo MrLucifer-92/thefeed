@@ -356,6 +356,8 @@
           onclick="switchSettingsTab('connection')" data-i18n="settings_tab_connection">Connection</button>
         <button type="button" class="settings-tab" id="settingsTabBtnStorage"
           onclick="switchSettingsTab('storage')" data-i18n="settings_tab_storage">Storage</button>
+        <button type="button" class="settings-tab" id="settingsTabBtnBackup" onclick="switchSettingsTab('backup')"
+          data-i18n="settings_tab_backup">Backup</button>
         <button type="button" class="settings-tab" id="settingsTabBtnAbout" onclick="switchSettingsTab('about')"
           data-i18n="settings_tab_about">About</button>
       </div>
@@ -533,6 +535,46 @@
           <div style="font-size:11px;color:var(--text-dim);margin-top:4px" data-i18n="storage_budget_min">Minimum 50 MB</div>
         </div>
         <div id="storageCacheList" style="margin-top:4px"></div>
+      </div>
+
+      <!-- ===== Backup tab ===== -->
+      <div class="settings-panel" id="settingsPanelBackup" style="display:none">
+        <div style="padding:14px 0 10px;border-bottom:1px solid var(--border)">
+          <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:10px" data-i18n="backup_export">Export Backup</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
+              <input type="checkbox" id="bkProfiles" checked> <span data-i18n="backup_profiles">Profiles &amp; Settings</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
+              <input type="checkbox" id="bkChat" checked> <span data-i18n="backup_chat">Chat Identity &amp; Messages</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
+              <input type="checkbox" id="bkSaved" checked> <span data-i18n="backup_saved">Saved Messages</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
+              <input type="checkbox" id="bkMedia"> <span data-i18n="backup_media">Saved Media Files</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
+              <input type="checkbox" id="bkBgImage"> <span data-i18n="backup_bg">Background Image</span>
+            </label>
+          </div>
+          <div style="margin-top:12px">
+            <input type="password" id="bkExportPw" placeholder="Backup password" data-i18n-ph="backup_password_ph"
+              style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;box-sizing:border-box">
+          </div>
+          <button class="btn btn-primary" id="bkExportBtn" onclick="doBackupExport()" style="width:100%;margin-top:10px"
+            data-i18n="backup_export_btn">Export</button>
+        </div>
+        <div style="padding:14px 0 10px">
+          <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:10px" data-i18n="backup_import">Import Backup</div>
+          <input type="file" id="bkImportFile" accept=".tfbak"
+            style="font-size:12px;color:var(--text);width:100%;margin-bottom:8px">
+          <input type="password" id="bkImportPw" placeholder="Backup password" data-i18n-ph="backup_password_ph"
+            style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;box-sizing:border-box;margin-bottom:10px">
+          <button class="btn btn-outline" onclick="doBackupPreview()" style="width:100%"
+            data-i18n="backup_preview_btn">Preview</button>
+          <div id="bkPreviewResult" style="display:none;margin-top:12px"></div>
+        </div>
       </div>
 
       <!-- ===== About tab ===== -->

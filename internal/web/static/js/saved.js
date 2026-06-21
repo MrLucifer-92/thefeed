@@ -326,9 +326,9 @@ function renderSavedItem(record) {
       var dlName = (record.kind === 'file' && record.fileName)
         ? record.fileName
         : (md.tag.replace(/[\[\]]/g, '').toLowerCase() || 'media') + '-' + md.size;
-      var dlBtn = '<a class="saved-media-save" href="' + src + '" download="' + escAttr(dlName) + '" '
+      var dlBtn = '<button class="saved-media-save" onclick="savedMediaSave(\'' + escAttr(src) + '\',\'' + escAttr(dlName) + '\')" '
         + 'title="' + escAttr(t('download') || 'Download') + '" aria-label="' + escAttr(t('download') || 'Download') + '">'
-        + icon('download') + '</a>';
+        + icon('download') + '</button>';
       if (md.tag === '[IMAGE]' || md.tag === '[STICKER]' || md.tag === '[GIF]') {
         imageCards.push('<div class="media-card"><img class="media-img saved-media-open" src="' + src + '" loading="lazy" alt="" onclick="savedMediaOpen(this)">' + dlBtn + '</div>');
       } else if (md.tag === '[VIDEO]') {
@@ -345,10 +345,10 @@ function renderSavedItem(record) {
           + '<div class="sm-filename">' + esc(dlName) + '</div>'
           + '<div class="sm-filesize">' + formatBytes(md.size) + '</div>'
           + '</div></div>'
-          + '<a class="sm-dl-btn" href="' + src + '" download="' + escAttr(dlName) + '">'
+          + '<button class="sm-dl-btn" onclick="savedMediaSave(\'' + escAttr(src) + '\',\'' + escAttr(dlName) + '\')">'
           + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7,10 12,15 17,10"/></svg>'
           + esc(t('download') || 'Download')
-          + '</a>';
+          + '</button>';
       }
     } else if (isActive) {
       mediaHtml += '<div class="saved-media-pending"><button class="saved-media-dl" data-dl-size="' + md.size + '" data-dl-crc="' + escAttr(crcHex) + '">' + icon('download') + ' ' + md.tag + ' (' + formatBytes(md.size) + ')</button></div>';
@@ -1097,6 +1097,22 @@ function copySavedText(savedId) {
   }
 }
 
+// Blob-based download that works in all WebViews (the <a download> attribute
+// is unreliable in WKWebView and some Android WebViews).
+async function savedMediaSave(url, filename) {
+  try {
+    var r = await fetch(url);
+    if (!r.ok) { showToast(t('msg_not_in_cache') || 'Unavailable'); return; }
+    var blob = await r.blob();
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename || 'download';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
+  } catch (e) { showToast(t('msg_not_in_cache') || 'Download failed'); }
+}
+
 function savedMediaOpen(img) {
   var src = img.src || img.getAttribute('src');
   if (!src) return;
@@ -1145,6 +1161,7 @@ window.savedUnpinAll = savedUnpinAll;
 window.clearSavedSearch = clearSavedSearch;
 window.copySavedText = copySavedText;
 window.savedMediaOpen = savedMediaOpen;
+window.savedMediaSave = savedMediaSave;
 
 // Auto-init on DOMContentLoaded
 if (document.readyState === 'loading') {

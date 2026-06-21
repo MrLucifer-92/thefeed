@@ -32,11 +32,14 @@ function openSettings() {
 }
 
 function switchSettingsTab(tab) {
-  var tabs = ['display', 'connection', 'storage', 'about'];
+  var tabs = ['display', 'connection', 'storage', 'backup', 'about'];
   tabs.forEach(function (name) {
     var btn = document.getElementById('settingsTabBtn' + name.charAt(0).toUpperCase() + name.slice(1));
     var panel = document.getElementById('settingsPanel' + name.charAt(0).toUpperCase() + name.slice(1));
-    if (btn) btn.classList.toggle('active', name === tab);
+    if (btn) {
+      btn.classList.toggle('active', name === tab);
+      if (name === tab) btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    }
     if (panel) panel.style.display = name === tab ? '' : 'none';
   });
   if (tab === 'storage') loadCacheStats();
@@ -550,5 +553,157 @@ function toggleResolverBankInfo() {
   if (open) panel.removeAttribute('hidden');
   else panel.setAttribute('hidden', '');
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// ── Backup & Restore ──
+
+function doBackupExport() {
+  var pw = document.getElementById('bkExportPw').value;
+  if (!pw) { showToast(t('backup_password_required') || 'Enter a password'); return; }
+  var sections = [];
+  if (document.getElementById('bkProfiles').checked) sections.push('profiles');
+  if (document.getElementById('bkChat').checked) sections.push('chat');
+  if (document.getElementById('bkSaved').checked) sections.push('saved');
+  if (document.getElementById('bkMedia').checked) sections.push('savedMedia');
+  if (document.getElementById('bkBgImage').checked) sections.push('bgImage');
+  if (!sections.length) { showToast(t('backup_select_section') || 'Select at least one section'); return; }
+
+  var btn = document.getElementById('bkExportBtn');
+  btn.disabled = true;
+  var origText = btn.textContent;
+  btn.textContent = '...';
+
+  fetch('/api/backup/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: pw, sections: sections })
+  }).then(function (r) {
+    if (r.status === 423) throw new Error(t('backup_saved_locked') || 'Unlock saved messages first');
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    return r.blob();
+  }).then(function (blob) {
+    var a = document.createElement('a');
+    var blobUrl = URL.createObjectURL(blob);
+    a.href = blobUrl;
+    a.download = 'thefeed-backup.tfbak';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(blobUrl); a.remove(); }, 60000);
+    showToast(t('backup_exported') || 'Backup exported');
+  }).catch(function (e) {
+    showToast(e.message || 'Export failed');
+  }).finally(function () {
+    btn.disabled = false;
+    btn.textContent = origText;
+    document.getElementById('bkExportPw').value = '';
+  });
+}
+
+function doBackupPreview() {
+  var fileEl = document.getElementById('bkImportFile');
+  var pw = document.getElementById('bkImportPw').value;
+  if (!fileEl.files.length) { showToast(t('backup_select_file') || 'Select a backup file'); return; }
+  if (!pw) { showToast(t('backup_password_required') || 'Enter a password'); return; }
+
+  var fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  fd.append('password', pw);
+
+  fetch('/api/backup/preview', { method: 'POST', body: fd })
+    .then(function (r) {
+      if (r.status === 401) throw new Error(t('backup_wrong_password') || 'Wrong password');
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      return r.json();
+    })
+    .then(function (d) { renderBackupPreview(d); })
+    .catch(function (e) { showToast(e.message || 'Preview failed'); });
+}
+
+function renderBackupPreview(d) {
+  var el = document.getElementById('bkPreviewResult');
+  if (!el) return;
+  var html = '<div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">';
+
+  if (d.createdAt) {
+    var dt = new Date(d.createdAt * 1000);
+    html += '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">' + esc(dt.toLocaleString()) + '</div>';
+  }
+
+  var items = [];
+  if (d.profiles) {
+    items.push({ id: 'profiles', label: t('backup_profiles') || 'Profiles & Settings',
+      detail: d.profiles.count + ' — ' + (d.profiles.names || []).join(', ') });
+  }
+  if (d.chat) {
+    var parts = [];
+    if (d.chat.identity) parts.push(t('backup_identity') || 'Identity');
+    if (d.chat.contacts) parts.push(d.chat.contacts + ' ' + (t('backup_contacts') || 'contacts'));
+    if (d.chat.threads) parts.push(d.chat.threads + ' ' + (t('backup_threads') || 'threads'));
+    if (d.chat.messages) parts.push(d.chat.messages + ' ' + (t('backup_msgs') || 'messages'));
+    items.push({ id: 'chat', label: t('backup_chat') || 'Chat', detail: parts.join(', ') });
+  }
+  if (d.saved) {
+    items.push({ id: 'saved', label: t('backup_saved') || 'Saved Messages',
+      detail: d.saved.count + ' ' + (t('backup_items') || 'items') });
+  }
+  if (d.savedMedia) {
+    items.push({ id: 'savedMedia', label: t('backup_media') || 'Saved Media',
+      detail: d.savedMedia.count + ' ' + (t('backup_files') || 'files') + ' (' + fmtBytes(d.savedMedia.bytes) + ')' });
+  }
+  if (d.bgImage) {
+    items.push({ id: 'bgImage', label: t('backup_bg') || 'Background Image', detail: fmtBytes(d.bgImage.bytes) });
+  }
+
+  items.forEach(function (it) {
+    html += '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px;color:var(--text);border-bottom:1px solid var(--border)">'
+      + '<input type="checkbox" class="bk-restore-section" value="' + it.id + '" checked>'
+      + '<span style="flex:1">' + esc(it.label) + '</span>'
+      + '<span style="font-size:11px;color:var(--text-dim)">' + esc(it.detail) + '</span>'
+      + '</label>';
+  });
+
+  html += '</div>';
+  html += '<button class="btn btn-primary" id="bkRestoreBtn" onclick="doBackupRestore()" style="width:100%;margin-top:10px">'
+    + (t('backup_restore_btn') || 'Restore') + '</button>';
+
+  el.innerHTML = html;
+  el.style.display = '';
+}
+
+function doBackupRestore() {
+  var fileEl = document.getElementById('bkImportFile');
+  var pw = document.getElementById('bkImportPw').value;
+  if (!fileEl.files.length || !pw) return;
+
+  var checks = document.querySelectorAll('.bk-restore-section:checked');
+  var sections = [];
+  for (var i = 0; i < checks.length; i++) sections.push(checks[i].value);
+  if (!sections.length) { showToast(t('backup_select_section') || 'Select at least one section'); return; }
+
+  if (!confirm(t('backup_restore_confirm') || 'This will overwrite current data. Continue?')) return;
+
+  var btn = document.getElementById('bkRestoreBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+
+  var fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  fd.append('password', pw);
+  fd.append('sections', JSON.stringify(sections));
+
+  fetch('/api/backup/restore', { method: 'POST', body: fd })
+    .then(function (r) {
+      if (r.status === 401) throw new Error(t('backup_wrong_password') || 'Wrong password');
+      if (r.status === 423) throw new Error(t('backup_saved_locked') || 'Unlock saved messages first');
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      return r.json();
+    })
+    .then(function () {
+      showToast(t('backup_restored') || 'Backup restored');
+      setTimeout(function () { location.reload(); }, 1000);
+    })
+    .catch(function (e) {
+      showToast(e.message || 'Restore failed');
+      if (btn) { btn.disabled = false; btn.textContent = t('backup_restore_btn') || 'Restore'; }
+    });
 }
 
