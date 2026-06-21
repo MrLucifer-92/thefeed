@@ -409,6 +409,7 @@ func (s *Server) restoreProfiles(data json.RawMessage) error {
 			_ = s.saveConfig(&cfg)
 			if s.scanner != nil {
 				_ = s.initFetcher()
+				s.applySelectedList()
 			}
 			break
 		}

@@ -17,6 +17,7 @@ type SavedMedia struct {
 	Size      int64  `json:"size"`
 	CRC       uint32 `json:"crc"`
 	Persisted bool   `json:"persisted"`
+	Fname     string `json:"fname,omitempty"`
 }
 
 // SavedItem is one bookmarked message, scoped to a config's domain (the stable
@@ -313,7 +314,7 @@ func (s *Server) savedFindChat(text, contact string) string {
 
 // mediaTagRe matches the downloadable-media wire format embedded in message
 // text: [TAG]size:relayflags:ch:blk:crc[:filename]. Captures tag, size, crc.
-var mediaTagRe = regexp.MustCompile(`\[(IMAGE|VIDEO|FILE|AUDIO|STICKER|GIF|CONTACT|LOCATION)\](\d+):[0-9,]+:\d+:\d+:([0-9a-fA-F]+)`)
+var mediaTagRe = regexp.MustCompile(`\[(IMAGE|VIDEO|FILE|AUDIO|STICKER|GIF|CONTACT|LOCATION)\](\d+):[0-9,]+:\d+:\d+:([0-9a-fA-F]+)(?::([^\n]*))?`)
 
 // parseSavedMedia extracts media references from a message's text.
 func parseSavedMedia(text string) []SavedMedia {
@@ -325,7 +326,7 @@ func parseSavedMedia(text string) []SavedMedia {
 		if err1 != nil || err2 != nil || size <= 0 || crc == 0 {
 			continue
 		}
-		out = append(out, SavedMedia{Tag: "[" + m[1] + "]", Size: size, CRC: uint32(crc)})
+		out = append(out, SavedMedia{Tag: "[" + m[1] + "]", Size: size, CRC: uint32(crc), Fname: m[4]})
 	}
 	return out
 }

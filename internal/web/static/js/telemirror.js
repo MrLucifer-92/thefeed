@@ -231,6 +231,11 @@
       e.preventDefault();
       zoomAt(Math.exp(-e.deltaY * 0.0022), e.clientX, e.clientY);
     }, { passive: false });
+    // iOS 13+ ignores user-scalable=no; block native pinch-zoom on
+    // the lightbox so our custom zoom works cleanly.
+    var pg = function (e) { e.preventDefault(); };
+    box.addEventListener('gesturestart', pg, { passive: false });
+    box.addEventListener('gesturechange', pg, { passive: false });
   }
 
   // Telegram wraps every emoji in <i class="emoji" style="background-image:url(...)"><b>X</b></i>
@@ -876,14 +881,7 @@
     }
 
     doFetch().then(function (blob) {
-      var objectUrl = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = fname;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(objectUrl); a.remove(); }, 100);
+      triggerDownload(blob, fname);
     }).catch(function () { window.location.href = url; });
     return false;
   };
@@ -975,7 +973,8 @@
               if (pr.ok) pd = await pr.json();
             }
             if (pd && pd.size) {
-              media.push({ tag: '[IMAGE]', size: pd.size, crc: pd.crc, persisted: true });
+              var fn = 'photo-' + (mi + 1) + '.jpg';
+              media.push({ tag: '[IMAGE]', size: pd.size, crc: pd.crc, persisted: true, fname: fn });
             }
           } catch (e) { /* skip this image */ }
         }

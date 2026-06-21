@@ -428,6 +428,38 @@ function showInputDialog(opts) {
   });
 }
 
+// triggerDownload saves a blob to the user's device. On iOS WKWebView the
+// <a download> attribute is ignored, so we use the Web Share API instead.
+function triggerDownload(blob, filename) {
+  // Ensure the filename has an extension — iOS share sheet uses it
+  // literally, unlike <a download> which can infer from MIME type.
+  if (filename && filename.indexOf('.') === -1 && blob.type) {
+    var ext = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+      'image/webp': '.webp', 'video/mp4': '.mp4', 'audio/mpeg': '.mp3',
+      'audio/ogg': '.ogg', 'application/pdf': '.pdf' }[blob.type];
+    if (!ext) {
+      var sub = blob.type.split('/')[1];
+      if (sub) ext = '.' + sub.replace(/\+.*$/, '');
+    }
+    if (ext) filename += ext;
+  }
+  if (navigator.share && navigator.canShare) {
+    try {
+      var file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+      if (navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file] }).catch(function () {});
+        return;
+      }
+    } catch (e) {}
+  }
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
+}
+
 // showInfoDialog is the one-button cousin of showConfirmDialog: a small
 // modal with a message and a single OK button. Used for explanatory
 // bits like "this file is too large for the server cache".

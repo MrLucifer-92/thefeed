@@ -325,6 +325,8 @@ function renderSavedItem(record) {
       var src = '/api/saved/media?size=' + md.size + '&crc=' + crcHex;
       var dlName = (record.kind === 'file' && record.fileName)
         ? record.fileName
+        : md.fname
+        ? md.fname
         : (md.tag.replace(/[\[\]]/g, '').toLowerCase() || 'media') + '-' + md.size;
       var dlBtn = '<button class="saved-media-save" onclick="savedMediaSave(\'' + escAttr(src) + '\',\'' + escAttr(dlName) + '\')" '
         + 'title="' + escAttr(t('download') || 'Download') + '" aria-label="' + escAttr(t('download') || 'Download') + '">'
@@ -1104,12 +1106,7 @@ async function savedMediaSave(url, filename) {
     var r = await fetch(url);
     if (!r.ok) { showToast(t('msg_not_in_cache') || 'Unavailable'); return; }
     var blob = await r.blob();
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename || 'download';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function() { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
+    triggerDownload(blob, filename || 'download');
   } catch (e) { showToast(t('msg_not_in_cache') || 'Download failed'); }
 }
 

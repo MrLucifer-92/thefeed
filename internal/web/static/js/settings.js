@@ -195,13 +195,13 @@ function setAppPassword() {
   } catch (e) { }
 }
 
-function removeAppPassword() {
+async function removeAppPassword() {
   if (typeof Android === 'undefined') return;
   var pw = document.getElementById('appPasswordCurrent').value;
   var errEl = document.getElementById('passwordRemoveError');
   errEl.style.display = 'none';
   if (!pw) { errEl.textContent = t('password_empty'); errEl.style.display = ''; return }
-  if (!confirm(t('password_remove_confirm'))) return;
+  if (!(await showConfirmDialog(t('password_remove_confirm')))) return;
   try {
     var ok = Android.removePassword(pw);
     if (ok) {
@@ -582,13 +582,7 @@ function doBackupExport() {
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
     return r.blob();
   }).then(function (blob) {
-    var a = document.createElement('a');
-    var blobUrl = URL.createObjectURL(blob);
-    a.href = blobUrl;
-    a.download = 'thefeed-backup.tfbak';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function () { URL.revokeObjectURL(blobUrl); a.remove(); }, 60000);
+    triggerDownload(blob, 'thefeed-backup.tfbak');
     showToast(t('backup_exported') || 'Backup exported');
   }).catch(function (e) {
     showToast(e.message || 'Export failed');
@@ -622,6 +616,9 @@ function doBackupPreview() {
 function renderBackupPreview(d) {
   var el = document.getElementById('bkPreviewResult');
   if (!el) return;
+  var inputs = document.getElementById('bkImportInputs');
+  if (inputs) inputs.style.display = 'none';
+
   var html = '<div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">';
 
   if (d.createdAt) {
@@ -655,22 +652,33 @@ function renderBackupPreview(d) {
   }
 
   items.forEach(function (it) {
-    html += '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px;color:var(--text);border-bottom:1px solid var(--border)">'
-      + '<input type="checkbox" class="bk-restore-section" value="' + it.id + '" checked>'
-      + '<span style="flex:1">' + esc(it.label) + '</span>'
-      + '<span style="font-size:11px;color:var(--text-dim)">' + esc(it.detail) + '</span>'
+    html += '<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;font-size:13px;color:var(--text);border-bottom:1px solid var(--border)">'
+      + '<input type="checkbox" class="bk-restore-section" value="' + it.id + '" checked style="margin-top:2px">'
+      + '<span style="flex:1;min-width:0"><span style="display:block">' + esc(it.label) + '</span>'
+      + '<span style="display:block;font-size:11px;color:var(--text-dim);word-break:break-word">' + esc(it.detail) + '</span></span>'
       + '</label>';
   });
 
   html += '</div>';
-  html += '<button class="btn btn-primary" id="bkRestoreBtn" onclick="doBackupRestore()" style="width:100%;margin-top:10px">'
-    + (t('backup_restore_btn') || 'Restore') + '</button>';
+  html += '<div style="display:flex;gap:8px;margin-top:10px">'
+    + '<button class="btn btn-outline" onclick="hideBackupPreview()" style="flex:1">'
+    + (t('cancel') || 'Cancel') + '</button>'
+    + '<button class="btn btn-primary" id="bkRestoreBtn" onclick="doBackupRestore()" style="flex:1">'
+    + (t('backup_restore_btn') || 'Restore') + '</button>'
+    + '</div>';
 
   el.innerHTML = html;
   el.style.display = '';
 }
 
-function doBackupRestore() {
+function hideBackupPreview() {
+  var el = document.getElementById('bkPreviewResult');
+  if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+  var inputs = document.getElementById('bkImportInputs');
+  if (inputs) inputs.style.display = '';
+}
+
+async function doBackupRestore() {
   var fileEl = document.getElementById('bkImportFile');
   var pw = document.getElementById('bkImportPw').value;
   if (!fileEl.files.length || !pw) return;
@@ -680,7 +688,7 @@ function doBackupRestore() {
   for (var i = 0; i < checks.length; i++) sections.push(checks[i].value);
   if (!sections.length) { showToast(t('backup_select_section') || 'Select at least one section'); return; }
 
-  if (!confirm(t('backup_restore_confirm') || 'This will overwrite current data. Continue?')) return;
+  if (!(await showConfirmDialog(t('backup_restore_confirm') || 'This will overwrite current data. Continue?'))) return;
 
   var btn = document.getElementById('bkRestoreBtn');
   if (btn) { btn.disabled = true; btn.textContent = '...'; }

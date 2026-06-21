@@ -147,6 +147,15 @@ func TestParseSavedMedia(t *testing.T) {
 	}
 }
 
+func TestParseSavedMediaFilename(t *testing.T) {
+	text := "[FILE]1024:0:5:1:abcd1234:report.pdf\ncaption"
+	got := parseSavedMedia(text)
+	want := []SavedMedia{{Tag: "[FILE]", Size: 1024, CRC: 0xabcd1234, Fname: "report.pdf"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseSavedMedia = %+v, want %+v", got, want)
+	}
+}
+
 func TestParseSavedMedia_None(t *testing.T) {
 	if got := parseSavedMedia("just text, no media"); len(got) != 0 {
 		t.Fatalf("expected no media, got %+v", got)
