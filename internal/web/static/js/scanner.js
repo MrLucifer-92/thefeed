@@ -318,13 +318,28 @@ function normalizeArabicPersian(s) {
     .replace(/[\u064B-\u065F\u0610-\u061A\u0670]/g, '') // strip tashkil/diacritics
     .replace(/[\u200C\u200D\u200E\u200F]/g, '') // strip ZWNJ, ZWJ, directional marks
 }
+var _kebabParent = null;
 function toggleKebabMenu(e) {
   e.stopPropagation();
-  document.getElementById('headerKebabMenu').classList.toggle('open');
+  var menu = document.getElementById('headerKebabMenu');
+  if (!menu) return;
+  if (menu.classList.contains('open')) { closeKebabMenu(); return; }
+  var btn = e.currentTarget;
+  var r = btn.getBoundingClientRect();
+  _kebabParent = menu.parentNode;
+  document.body.appendChild(menu);
+  menu.style.top = (r.bottom + 4) + 'px';
+  menu.style.right = (window.innerWidth - r.right) + 'px';
+  menu.classList.add('open');
 }
 function closeKebabMenu() {
   var m = document.getElementById('headerKebabMenu');
-  if (m) m.classList.remove('open');
+  if (!m) return;
+  m.classList.remove('open');
+  if (_kebabParent && m.parentNode === document.body) {
+    _kebabParent.appendChild(m);
+    _kebabParent = null;
+  }
 }
 document.addEventListener('click', closeKebabMenu);
 
