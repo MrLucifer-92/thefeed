@@ -43,6 +43,15 @@ function switchSettingsTab(tab) {
     if (panel) panel.style.display = name === tab ? '' : 'none';
   });
   if (tab === 'storage') loadCacheStats();
+  var actions = document.getElementById('settingsActions');
+  if (actions) {
+    var save = actions.querySelector('[onclick="saveSettings()"]');
+    if (tab === 'backup' || tab === 'about' || tab === 'storage') {
+      if (save) save.style.display = 'none';
+    } else {
+      if (save) save.style.display = '';
+    }
+  }
 }
 
 function toggleHelp(id) {
