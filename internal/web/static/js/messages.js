@@ -64,3 +64,18 @@ function renderPollCard(pollBody) {
   return html;
 }
 
+// Intercept link clicks in the main feed messages area.
+(function () {
+  document.addEventListener('DOMContentLoaded', function () {
+    var el = document.getElementById('messages');
+    if (!el) return;
+    el.addEventListener('click', function (e) {
+      var a = e.target.closest('a[href]');
+      if (!a) return;
+      e.preventDefault();
+      e.stopPropagation();
+      showLinkSheet(a.href);
+    });
+  }, { once: true });
+})();
+

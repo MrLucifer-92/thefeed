@@ -231,6 +231,11 @@
       e.preventDefault();
       zoomAt(Math.exp(-e.deltaY * 0.0022), e.clientX, e.clientY);
     }, { passive: false });
+    // iOS 13+ ignores user-scalable=no; block native pinch-zoom on
+    // the lightbox so our custom zoom works cleanly.
+    var pg = function (e) { e.preventDefault(); };
+    box.addEventListener('gesturestart', pg, { passive: false });
+    box.addEventListener('gesturechange', pg, { passive: false });
   }
 
   // Telegram wraps every emoji in <i class="emoji" style="background-image:url(...)"><b>X</b></i>
@@ -876,14 +881,7 @@
     }
 
     doFetch().then(function (blob) {
-      var objectUrl = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = fname;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(objectUrl); a.remove(); }, 100);
+      triggerDownload(blob, fname);
     }).catch(function () { window.location.href = url; });
     return false;
   };
@@ -975,7 +973,8 @@
               if (pr.ok) pd = await pr.json();
             }
             if (pd && pd.size) {
-              media.push({ tag: '[IMAGE]', size: pd.size, crc: pd.crc, persisted: true });
+              var fn = 'photo-' + (mi + 1) + '.jpg';
+              media.push({ tag: '[IMAGE]', size: pd.size, crc: pd.crc, persisted: true, fname: fn });
             }
           } catch (e) { /* skip this image */ }
         }
@@ -1123,7 +1122,44 @@
       for (var k = a.attributes.length - 1; k >= 0; k--) {
         if (/^on/i.test(a.attributes[k].name)) a.removeAttribute(a.attributes[k].name);
       }
-      a.setAttribute('data-href', a.href);
+      var url = a.href;
+      // Telegram double-encodes & as &amp;amp; in embed hrefs; the
+      // browser decodes one level → &amp; remains in the resolved URL.
+      url = url.replace(/&amp;/g, '&');
+      var text = (a.textContent || '').trim();
+      if (text && /^https?:\/\//i.test(text) && text.length > url.length) {
+        url = text;
+      }
+      // Google Translate splits URLs at & boundaries — the <a> tag
+      // wraps only the first param and the rest leaks as trailing
+      // text/inline nodes. Stitch them back by consuming siblings
+      // that look like query-param continuations (&key=value...).
+      var sib = a.nextSibling;
+      while (sib) {
+        var chunk = '';
+        if (sib.nodeType === 3) { chunk = sib.textContent || ''; }
+        else if (sib.nodeType === 1 && sib.tagName !== 'BR') { chunk = sib.textContent || ''; }
+        else break;
+        // Must start with & and look like a query param continuation
+        if (/^&[A-Za-z0-9_]+=/.test(chunk)) {
+          // Might contain trailing text after the URL (newline, space, etc.)
+          var paramMatch = chunk.match(/^(&[A-Za-z0-9_]+=[^\s<>]*)/);
+          if (paramMatch) {
+            url += paramMatch[1];
+            var leftover = chunk.substring(paramMatch[1].length);
+            if (leftover) {
+              sib.textContent = leftover;
+              break;
+            }
+            var next = sib.nextSibling;
+            sib.parentNode.removeChild(sib);
+            sib = next;
+            continue;
+          }
+        }
+        break;
+      }
+      a.setAttribute('data-href', url);
       a.removeAttribute('href');
       a.removeAttribute('target');
       a.style.cursor = 'pointer';
@@ -1131,9 +1167,13 @@
   }
 
   // Parse a t.me URL → { user, postId } or null.
+  // Excludes special Telegram paths (proxy, socks, share, etc.)
+  var _tgSpecialPaths = /^(?:proxy|socks|share|addstickers|addemoji|addtheme|setlanguage|login|confirmphone|iv|joinchat|addlist|boost|contact|passport|premium|giftcode|invoice|stars|m|dl|bg|c)$/i;
   function tmParseTgLink(url) {
-    var m = url.match(/^https?:\/\/(?:t\.me|telegram\.me)\/([A-Za-z_][A-Za-z0-9_]{3,31})(?:\/(\d+))?(?:[?#].*)?$/);
-    return m ? { user: m[1], postId: m[2] || '' } : null;
+    var m = url.match(/^https?:\/\/(?:t\.me|telegram\.me)\/([A-Za-z_][A-Za-z0-9_]{3,31})(?:\/(\d+))?(?:\?[^#]*)?(?:#.*)?$/);
+    if (!m) return null;
+    if (_tgSpecialPaths.test(m[1])) return null;
+    return { user: m[1], postId: m[2] || '' };
   }
 
   // Scroll to a post by its numeric message ID. Returns true if found.

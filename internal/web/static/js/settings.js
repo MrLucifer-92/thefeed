@@ -32,14 +32,26 @@ function openSettings() {
 }
 
 function switchSettingsTab(tab) {
-  var tabs = ['display', 'connection', 'storage', 'about'];
+  var tabs = ['display', 'connection', 'storage', 'backup', 'about'];
   tabs.forEach(function (name) {
     var btn = document.getElementById('settingsTabBtn' + name.charAt(0).toUpperCase() + name.slice(1));
     var panel = document.getElementById('settingsPanel' + name.charAt(0).toUpperCase() + name.slice(1));
-    if (btn) btn.classList.toggle('active', name === tab);
+    if (btn) {
+      btn.classList.toggle('active', name === tab);
+      if (name === tab) btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    }
     if (panel) panel.style.display = name === tab ? '' : 'none';
   });
   if (tab === 'storage') loadCacheStats();
+  var actions = document.getElementById('settingsActions');
+  if (actions) {
+    var save = actions.querySelector('[onclick="saveSettings()"]');
+    if (tab === 'backup' || tab === 'about' || tab === 'storage') {
+      if (save) save.style.display = 'none';
+    } else {
+      if (save) save.style.display = '';
+    }
+  }
 }
 
 function toggleHelp(id) {
@@ -192,13 +204,13 @@ function setAppPassword() {
   } catch (e) { }
 }
 
-function removeAppPassword() {
+async function removeAppPassword() {
   if (typeof Android === 'undefined') return;
   var pw = document.getElementById('appPasswordCurrent').value;
   var errEl = document.getElementById('passwordRemoveError');
   errEl.style.display = 'none';
   if (!pw) { errEl.textContent = t('password_empty'); errEl.style.display = ''; return }
-  if (!confirm(t('password_remove_confirm'))) return;
+  if (!(await showConfirmDialog(t('password_remove_confirm')))) return;
   try {
     var ok = Android.removePassword(pw);
     if (ok) {
@@ -550,5 +562,167 @@ function toggleResolverBankInfo() {
   if (open) panel.removeAttribute('hidden');
   else panel.setAttribute('hidden', '');
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// ── Backup & Restore ──
+
+function doBackupExport() {
+  var pw = document.getElementById('bkExportPw').value;
+  if (!pw) { showToast(t('backup_password_required') || 'Enter a password'); return; }
+  var sections = [];
+  if (document.getElementById('bkProfiles').checked) sections.push('profiles');
+  if (document.getElementById('bkChat').checked) sections.push('chat');
+  if (document.getElementById('bkSaved').checked) sections.push('saved');
+  if (document.getElementById('bkMedia').checked) sections.push('savedMedia');
+  if (document.getElementById('bkBgImage').checked) sections.push('bgImage');
+  if (!sections.length) { showToast(t('backup_select_section') || 'Select at least one section'); return; }
+
+  var btn = document.getElementById('bkExportBtn');
+  btn.disabled = true;
+  var origText = btn.textContent;
+  btn.textContent = '...';
+
+  fetch('/api/backup/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: pw, sections: sections })
+  }).then(function (r) {
+    if (r.status === 423) throw new Error(t('backup_saved_locked') || 'Unlock saved messages first');
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    return r.blob();
+  }).then(function (blob) {
+    triggerDownload(blob, 'thefeed-backup.tfbak');
+    if (!(window.Android && window.Android.saveMedia)) {
+      showToast(t('backup_exported') || 'Backup exported');
+    }
+  }).catch(function (e) {
+    showToast(e.message || 'Export failed');
+  }).finally(function () {
+    btn.disabled = false;
+    btn.textContent = origText;
+    document.getElementById('bkExportPw').value = '';
+  });
+}
+
+function doBackupPreview() {
+  var fileEl = document.getElementById('bkImportFile');
+  var pw = document.getElementById('bkImportPw').value;
+  if (!fileEl.files.length) { showToast(t('backup_select_file') || 'Select a backup file'); return; }
+  if (!pw) { showToast(t('backup_password_required') || 'Enter a password'); return; }
+
+  var fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  fd.append('password', pw);
+
+  fetch('/api/backup/preview', { method: 'POST', body: fd })
+    .then(function (r) {
+      if (r.status === 401) throw new Error(t('backup_wrong_password') || 'Wrong password');
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      return r.json();
+    })
+    .then(function (d) { renderBackupPreview(d); })
+    .catch(function (e) { showToast(e.message || 'Preview failed'); });
+}
+
+function renderBackupPreview(d) {
+  var el = document.getElementById('bkPreviewResult');
+  if (!el) return;
+  var inputs = document.getElementById('bkImportInputs');
+  if (inputs) inputs.style.display = 'none';
+
+  var html = '<div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">';
+
+  if (d.createdAt) {
+    var dt = new Date(d.createdAt * 1000);
+    html += '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">' + esc(dt.toLocaleString()) + '</div>';
+  }
+
+  var items = [];
+  if (d.profiles) {
+    items.push({ id: 'profiles', label: t('backup_profiles') || 'Profiles & Settings',
+      detail: d.profiles.count + ' — ' + (d.profiles.names || []).join(', ') });
+  }
+  if (d.chat) {
+    var parts = [];
+    if (d.chat.identity) parts.push(t('backup_identity') || 'Identity');
+    if (d.chat.contacts) parts.push(d.chat.contacts + ' ' + (t('backup_contacts') || 'contacts'));
+    if (d.chat.threads) parts.push(d.chat.threads + ' ' + (t('backup_threads') || 'threads'));
+    if (d.chat.messages) parts.push(d.chat.messages + ' ' + (t('backup_msgs') || 'messages'));
+    items.push({ id: 'chat', label: t('backup_chat') || 'Chat', detail: parts.join(', ') });
+  }
+  if (d.saved) {
+    items.push({ id: 'saved', label: t('backup_saved') || 'Saved Messages',
+      detail: d.saved.count + ' ' + (t('backup_items') || 'items') });
+  }
+  if (d.savedMedia) {
+    items.push({ id: 'savedMedia', label: t('backup_media') || 'Saved Media',
+      detail: d.savedMedia.count + ' ' + (t('backup_files') || 'files') + ' (' + fmtBytes(d.savedMedia.bytes) + ')' });
+  }
+  if (d.bgImage) {
+    items.push({ id: 'bgImage', label: t('backup_bg') || 'Background Image', detail: fmtBytes(d.bgImage.bytes) });
+  }
+
+  items.forEach(function (it) {
+    html += '<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;font-size:13px;color:var(--text);border-bottom:1px solid var(--border)">'
+      + '<input type="checkbox" class="bk-restore-section" value="' + it.id + '" checked style="margin-top:2px">'
+      + '<span style="flex:1;min-width:0"><span style="display:block">' + esc(it.label) + '</span>'
+      + '<span style="display:block;font-size:11px;color:var(--text-dim);word-break:break-word">' + esc(it.detail) + '</span></span>'
+      + '</label>';
+  });
+
+  html += '</div>';
+  html += '<div style="display:flex;gap:8px;margin-top:10px">'
+    + '<button class="btn btn-outline" onclick="hideBackupPreview()" style="flex:1">'
+    + (t('cancel') || 'Cancel') + '</button>'
+    + '<button class="btn btn-primary" id="bkRestoreBtn" onclick="doBackupRestore()" style="flex:1">'
+    + (t('backup_restore_btn') || 'Restore') + '</button>'
+    + '</div>';
+
+  el.innerHTML = html;
+  el.style.display = '';
+}
+
+function hideBackupPreview() {
+  var el = document.getElementById('bkPreviewResult');
+  if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+  var inputs = document.getElementById('bkImportInputs');
+  if (inputs) inputs.style.display = '';
+}
+
+async function doBackupRestore() {
+  var fileEl = document.getElementById('bkImportFile');
+  var pw = document.getElementById('bkImportPw').value;
+  if (!fileEl.files.length || !pw) return;
+
+  var checks = document.querySelectorAll('.bk-restore-section:checked');
+  var sections = [];
+  for (var i = 0; i < checks.length; i++) sections.push(checks[i].value);
+  if (!sections.length) { showToast(t('backup_select_section') || 'Select at least one section'); return; }
+
+  if (!(await showConfirmDialog(t('backup_restore_confirm') || 'This will overwrite current data. Continue?'))) return;
+
+  var btn = document.getElementById('bkRestoreBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+
+  var fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  fd.append('password', pw);
+  fd.append('sections', JSON.stringify(sections));
+
+  fetch('/api/backup/restore', { method: 'POST', body: fd })
+    .then(function (r) {
+      if (r.status === 401) throw new Error(t('backup_wrong_password') || 'Wrong password');
+      if (r.status === 423) throw new Error(t('backup_saved_locked') || 'Unlock saved messages first');
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      return r.json();
+    })
+    .then(function () {
+      showToast(t('backup_restored') || 'Backup restored');
+      setTimeout(function () { location.reload(); }, 1000);
+    })
+    .catch(function (e) {
+      showToast(e.message || 'Restore failed');
+      if (btn) { btn.disabled = false; btn.textContent = t('backup_restore_btn') || 'Restore'; }
+    });
 }
 

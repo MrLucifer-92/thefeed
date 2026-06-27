@@ -41,9 +41,10 @@ func (s *Server) handleSavedUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "saved media unavailable", http.StatusInternalServerError)
 		return
 	}
-	// Hard cap the whole request body, then parse the multipart form.
+	// Hard cap the whole request body, then parse entirely in RAM so Go never
+	// spills to a temp file — mobile WebViews may lack a writable tmpdir.
 	r.Body = http.MaxBytesReader(w, r.Body, savedUploadMaxBytes+(1<<20))
-	if err := r.ParseMultipartForm(8 << 20); err != nil {
+	if err := r.ParseMultipartForm(savedUploadMaxBytes + (1 << 20)); err != nil {
 		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
 		return
 	}

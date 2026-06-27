@@ -1145,7 +1145,7 @@ async function chatPin(addr, pin) {
 
 async function chatDelete(addr) {
   chatCloseMenu();
-  if (!confirm(chatT('chat_delete_confirm'))) return;
+  if (!(await showConfirmDialog(chatT('chat_delete_confirm')))) return;
   await fetch('/api/chat/thread', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ peer: addr, action: 'delete' }) });
   showToast(chatT('chat_deleted'));
   chatBackToList();
@@ -1155,7 +1155,7 @@ async function chatDelete(addr) {
 // conversation itself (contact, server, seq counters, ✓/✓✓). Local-only.
 async function chatClearMessages(addr) {
   chatCloseMenu();
-  if (!confirm(chatT('chat_clear_confirm'))) return;
+  if (!(await showConfirmDialog(chatT('chat_clear_confirm')))) return;
   await fetch('/api/chat/thread', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ peer: addr, action: 'clear' }) });
   showToast(chatT('chat_cleared'));
   if (chatState.view === 'thread' && chatState.peer === addr) chatRenderThread();

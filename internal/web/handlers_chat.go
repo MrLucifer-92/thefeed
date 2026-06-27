@@ -429,7 +429,7 @@ func (h *chatHub) rebuildServersLocked() {
 	if err != nil {
 		return
 	}
-	resolvers := h.s.chatResolvers()
+	sharedResolvers := h.s.chatResolvers()
 	for _, p := range pl.Profiles {
 		if strings.TrimSpace(p.Config.ServerKey) == "" {
 			continue
@@ -437,6 +437,12 @@ func (h *chatHub) rebuildServersLocked() {
 		key := chatServerKey(p.Config.Domain)
 		if key == "" || h.servers[key] != nil {
 			continue
+		}
+		// Use shared resolvers first; fall back to this profile's own
+		// resolvers so chat works even if the active config has none.
+		resolvers := sharedResolvers
+		if len(resolvers) == 0 {
+			resolvers = p.Config.Resolvers
 		}
 		f, ferr := h.s.buildChatFetcher(p.Config, resolvers, h.ctx)
 		if ferr != nil {

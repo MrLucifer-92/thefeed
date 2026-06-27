@@ -428,6 +428,84 @@ function showInputDialog(opts) {
   });
 }
 
+// triggerDownload saves a blob to the user's device. On iOS WKWebView the
+// <a download> attribute is ignored, so we use the Web Share API instead.
+function triggerDownload(blob, filename) {
+  // Ensure the filename has an extension — iOS share sheet and Android
+  // bridge use it literally, unlike <a download> which infers from MIME.
+  if (filename && filename.indexOf('.') === -1 && blob.type) {
+    var ext = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+      'image/webp': '.webp', 'video/mp4': '.mp4', 'audio/mpeg': '.mp3',
+      'audio/ogg': '.ogg', 'application/pdf': '.pdf' }[blob.type];
+    if (!ext) {
+      var sub = blob.type.split('/')[1];
+      if (sub) ext = '.' + sub.replace(/\+.*$/, '');
+    }
+    if (ext) filename += ext;
+  }
+  // Android bridge: reliable save to Downloads with a toast showing the path.
+  var bridge = (typeof window !== 'undefined' && window.Android) ? window.Android : null;
+  if (bridge && typeof bridge.saveMedia === 'function') {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var b64 = (reader.result || '').split(',')[1] || '';
+      try { bridge.saveMedia(b64, blob.type || 'application/octet-stream', filename); }
+      catch (e) { showToast('Save failed'); }
+    };
+    reader.readAsDataURL(blob);
+    return;
+  }
+  // iOS WKWebView: <a download> is ignored, use Web Share API instead.
+  if (navigator.share && navigator.canShare) {
+    try {
+      var file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+      if (navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file] }).catch(function () {});
+        return;
+      }
+    } catch (e) {}
+  }
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
+}
+
+// showLinkSheet displays a bottom-sheet with the full URL, copy and
+// open-in-browser buttons. Used by the main feed and telemirror.
+function showLinkSheet(url) {
+  var old = document.getElementById('linkSheetOverlay');
+  if (old) old.remove();
+  var overlay = document.createElement('div');
+  overlay.id = 'linkSheetOverlay';
+  overlay.className = 'link-overlay';
+  overlay.innerHTML = '<div class="link-sheet">'
+    + '<div class="link-title">' + esc(t('telemirror_open_this_link') || 'Open this link?') + '</div>'
+    + '<div class="link-url" dir="ltr">' + esc(url) + '</div>'
+    + '<div class="link-actions">'
+    + '<button class="link-btn link-copy">' + esc(t('telemirror_copy_link') || 'Copy link') + '</button>'
+    + '<button class="link-btn link-open">' + esc(t('telemirror_open_link') || 'Open in browser') + '</button>'
+    + '</div></div>';
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) overlay.remove();
+  });
+  overlay.querySelector('.link-copy').onclick = function () {
+    try {
+      if (navigator.clipboard) { navigator.clipboard.writeText(url).catch(function () {}); }
+      else { var ta = document.createElement('textarea'); ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+    } catch (e) {}
+    showToast(t('copied') || 'Copied');
+    overlay.remove();
+  };
+  overlay.querySelector('.link-open').onclick = function () {
+    window.open(url, '_blank', 'noopener,noreferrer');
+    overlay.remove();
+  };
+  document.body.appendChild(overlay);
+}
+
 // showInfoDialog is the one-button cousin of showConfirmDialog: a small
 // modal with a message and a single OK button. Used for explanatory
 // bits like "this file is too large for the server cache".

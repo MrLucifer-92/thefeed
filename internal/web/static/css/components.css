@@ -5,16 +5,20 @@
       border-top: 1px solid var(--border)
     }
 
-    /* Settings tab strip — static three-tab layout. */
+    /* Settings tab strip — scrollable when tabs overflow on small screens. */
     .settings-tabs {
       display: flex;
       gap: 4px;
       border-bottom: 1px solid var(--border);
       margin: 8px 0 14px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
     }
+    .settings-tabs::-webkit-scrollbar { display: none; }
 
     .settings-tab {
-      flex: 1;
+      flex: 0 0 auto;
       padding: 8px 10px;
       background: transparent;
       border: 0;
@@ -22,6 +26,7 @@
       font-size: var(--text-sm);
       cursor: pointer;
       border-bottom: 2px solid transparent;
+      white-space: nowrap;
     }
 
     .settings-tab.active {
@@ -1131,4 +1136,70 @@
     #toast.show {
       opacity: 1;
       transform: translateX(-50%) translateY(0)
+    }
+
+    /* ===== LINK SHEET ===== */
+    .link-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: rgba(0,0,0,.45);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center
+    }
+
+    .link-sheet {
+      background: var(--bg-elevated, var(--bg));
+      border-radius: 14px 14px 0 0;
+      width: 100%;
+      max-width: 480px;
+      padding: 18px 16px calc(env(safe-area-inset-bottom, 12px) + 12px);
+      box-shadow: 0 -4px 24px rgba(0,0,0,.25)
+    }
+
+    .link-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: var(--text)
+    }
+
+    .link-url {
+      font-size: 13px;
+      color: var(--text-dim);
+      word-break: break-all;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 14px;
+      user-select: all;
+      -webkit-user-select: all
+    }
+
+    .link-actions {
+      display: flex;
+      gap: 8px
+    }
+
+    .link-btn {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer
+    }
+
+    .link-copy {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text)
+    }
+
+    .link-open {
+      background: var(--accent);
+      color: #fff
     }

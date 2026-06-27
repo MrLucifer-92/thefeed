@@ -1067,6 +1067,12 @@ function attachPinchZoom(el, busyCb) {
   el.style.touchAction = 'none';
   el.style.transformOrigin = 'center center';
   el.style.transition = 'transform 0.1s ease-out';
+  // iOS 13+ ignores user-scalable=no; prevent native pinch-zoom on
+  // the overlay so our custom zoom isn't fought by the browser's.
+  var overlay = el.parentNode;
+  var preventGesture = function (e) { e.preventDefault(); };
+  overlay.addEventListener('gesturestart', preventGesture, { passive: false });
+  overlay.addEventListener('gesturechange', preventGesture, { passive: false });
 
   function apply() {
     el.style.transform = 'translate(' + translateX + 'px, ' + translateY + 'px) scale(' + scale + ')';
@@ -1085,6 +1091,7 @@ function attachPinchZoom(el, busyCb) {
   }
   el.addEventListener('touchstart', function (e) {
     if (e.touches.length === 2) {
+      e.preventDefault();
       pinchStartDist = distance(e.touches[0], e.touches[1]);
       startScale = scale;
       if (busyCb) busyCb(true);
@@ -1093,7 +1100,7 @@ function attachPinchZoom(el, busyCb) {
       startTY = e.touches[0].clientY - translateY;
       if (busyCb) busyCb(true);
     }
-  }, { passive: true });
+  }, { passive: false });
   el.addEventListener('touchmove', function (e) {
     if (e.touches.length === 2 && pinchStartDist > 0) {
       e.preventDefault();
