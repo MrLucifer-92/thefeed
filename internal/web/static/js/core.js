@@ -143,6 +143,16 @@ function feedBack() {
 }
 window.feedBack = feedBack;
 window.addEventListener('popstate', function () {
+  // This handles ONLY the feed's channel view. The Mirror/Chat/Resolver/Settings
+  // sections also set #app.chat-open for their channel/thread/pane views and run
+  // their OWN popstate handlers — so skip here, otherwise an unrelated history
+  // pop (e.g. closing a Mirror image lightbox) would call openSidebar() and
+  // collapse the section's view, leaving a broken state with the nav hidden.
+  var de = document.documentElement;
+  if (de.classList.contains('tm-open') || de.classList.contains('chat-section') ||
+      de.classList.contains('resolver-section') || de.classList.contains('settings-section')) {
+    return;
+  }
   if (mobileQuery.matches && document.getElementById('app').classList.contains('chat-open')) {
     openSidebar();
   }

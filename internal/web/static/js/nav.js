@@ -189,25 +189,6 @@ function applyTmNoteState() {
   } catch (e) { }
 }
 
-// ----- search-hide-on-scroll -----
-// Reveal-on-scroll: the search field hides when the list is scrolled down and
-// reappears on scroll-up. Bound to both the feed and the mirror channel lists.
-function initSearchHide() {
-  var sidebar = document.getElementById('sidebar');
-  if (!sidebar) return;
-  ['channelList', 'tmChannelsList'].forEach(function (id) {
-    var list = document.getElementById(id);
-    if (!list) return;
-    var lastY = 0;
-    list.addEventListener('scroll', function () {
-      var y = list.scrollTop;
-      if (y > 44 && y > lastY) sidebar.classList.add('search-collapsed');
-      else if (y < lastY - 4 || y <= 4) sidebar.classList.remove('search-collapsed');
-      lastY = y;
-    }, { passive: true });
-  });
-}
-
 // The mobile panes are positioned with transform; .app must never scroll. But a
 // descendant's scrollIntoView()/focus() (e.g. the auto-scroll-to-newest after
 // loading a channel) scrolls .app horizontally into the off-screen pane —
@@ -442,7 +423,6 @@ function initFloatHeaderMetric() {
   function go() {
     wrapNav();
     initAppScrollGuard();
-    initSearchHide();
     initSidebarResize();
     initPullToRefresh();
     initSwipeNav();

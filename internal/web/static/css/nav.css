@@ -167,23 +167,9 @@
       min-height: 0;
     }
 
-    .search-wrap {
-      overflow: hidden;
-      max-height: 56px;
-      opacity: 1;
-      transition: max-height var(--motion) var(--ease), opacity var(--motion-fast) var(--ease),
-        margin var(--motion) var(--ease);
-    }
-
     .search-wrap .sidebar-search {
       padding: 9px 14px;
       font-size: var(--text-sm);
-    }
-
-    .sidebar.search-collapsed .search-wrap {
-      max-height: 0;
-      opacity: 0;
-      margin-top: -6px;
     }
 
     /* Float the Feed/Mirror header (profile/add-channel + search) so the channel
