@@ -71,18 +71,27 @@ async function loadScannerPresets() {
     updateScanIpCount();
     return;
   }
+  // Turn the preset ON immediately so the button always works — the scan
+  // resolves "default" server-side (see handleScannerStart), so it runs even
+  // if we never learn the exact IP count. The count is display-only; fetching
+  // it must never be able to fail the whole action (a transient WebKit "Load
+  // failed" on iOS otherwise left the preset unset and the user stuck).
+  scannerActivePreset = 'default';
+  scannerPresetIpCount = 0;
+  renderPresetTag();
+  updateScanIpCount();
   try {
     var r = await fetch('/api/scanner/presets');
     if (!r.ok) return;
     var data = await r.json();
     var presets = data.presets || [];
     if (presets.length > 0) {
-      scannerActivePreset = presets[0].name;
+      scannerActivePreset = presets[0].name || 'default';
       scannerPresetIpCount = presets[0].count || 0;
       renderPresetTag();
       updateScanIpCount();
     }
-  } catch (e) { showToast(e.message) }
+  } catch (e) { /* count is display-only; preset is already active */ }
 }
 function renderPresetTag() {
   var tag = document.getElementById('scanPresetTag');
