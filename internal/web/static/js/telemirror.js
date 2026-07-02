@@ -741,7 +741,10 @@
       // Footer: timestamp + view count.
       html += '<div class="tm-post-foot">';
       if (p.views) html += '<span class="tm-views">' + window.icon('views') + ' ' + tmEsc(p.views) + '</span>';
-      if (when) html += '<span class="tm-post-time">' + tmEsc(when) + '</span>';
+      // <bdi> isolates the localized date so its parts (day / month / year /
+      // time) keep their correct order inside the LTR-forced foot — a Jalali
+      // Persian date otherwise got bidi-scrambled in RTL mode.
+      if (when) html += '<span class="tm-post-time"><bdi>' + tmEsc(when) + '</bdi></span>';
       html += '</div>';
 
       html += '</div>';

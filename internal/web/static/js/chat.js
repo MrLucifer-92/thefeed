@@ -1405,11 +1405,20 @@ async function chatRenderThread() {
   var keepScroll = prevBody && (prevBody.scrollHeight - prevBody.scrollTop - prevBody.clientHeight > 40);
   var prevScroll = prevBody ? prevBody.scrollTop : 0;
   var firstRender = prevInput == null;
-  var data = { msgs: [] };
+  var data = null;
   try {
     var r = await fetch('/api/chat/messages?peer=' + encodeURIComponent(addr) + '&markRead=1');
-    data = await r.json();
+    if (r.ok) data = await r.json();
   } catch (e) { }
+  // A failed/non-OK fetch (a transient local-server hiccup — e.g. right after a
+  // config switch or app resume) must NOT blank an already-open conversation:
+  // rendering an empty list here made the user's messages appear to vanish. Keep
+  // the current view and let the next tick retry; only the very first render has
+  // nothing to preserve and may fall through to the empty state.
+  if (data == null) {
+    if (!firstRender) return;
+    data = { msgs: [] };
+  }
   var msgs = data.msgs || []; // server may omit / null for an empty thread
   // Per-server ✓/✓✓ high-water seq (seq numbering is per server). Merge the
   // persisted thread counters (fresh: a just-committed send is bumped here)
