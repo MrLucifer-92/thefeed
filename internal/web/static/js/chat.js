@@ -1130,6 +1130,10 @@ async function openChatThread(addr) {
   // (server picker, the first-run "checking servers" spinner, a stray prompt) so
   // the render guard can't defer it and a full-screen overlay can't eat the tap.
   document.querySelectorAll('#chatModal .chat-sheet-overlay').forEach(function (o) { o.remove(); });
+  // The expanded recovery-code panel also trips chatOverlayOpen(), which would
+  // defer BOTH the list and thread render and leave a blank "select a
+  // conversation" pane. Collapse it too.
+  var _rec = document.getElementById('chatRecoveryBox'); if (_rec) _rec.style.display = 'none';
   chatState.guideAfterAvail = false; // don't re-pop the guide over the thread
   chatState.renderPending = false;
   chatState.view = 'thread';
