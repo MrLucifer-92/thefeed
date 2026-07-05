@@ -43,8 +43,8 @@
     return (typeof escAttr === 'function') ? escAttr(s) :
       tmEsc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
-  function tmToast(msg) {
-    if (typeof showToast === 'function') showToast(msg);
+  function tmToast(msg, ms) {
+    if (typeof showToast === 'function') showToast(msg, ms);
   }
 
   function tmInitial(name) {
@@ -1263,6 +1263,7 @@
   // load mid-flight. After the jump, media above the post keeps expanding
   // and drags it back out of view, so keep re-centering until the layout
   // settles; any manual scroll from the user cancels that immediately.
+  var _tmSettleGen = 0;
   function tmScrollToPost(msgId) {
     if (!msgId) return false;
     var el = document.querySelector('.tm-post[data-msgid="' + msgId + '"]');
@@ -1271,13 +1272,16 @@
     el.classList.remove('tm-post-highlight');
     void el.offsetWidth; // restart the animation on repeat jumps
     el.classList.add('tm-post-highlight');
+    // A newer jump owns the viewport — bump the generation so an older
+    // settle loop can't tug-of-war against this one for up to 2s.
+    var gen = ++_tmSettleGen;
     var until = Date.now() + 2000;
     var cancelled = false;
     var cancel = function () { cancelled = true; };
     window.addEventListener('wheel', cancel, { once: true, passive: true });
     window.addEventListener('touchstart', cancel, { once: true, passive: true });
     (function settle() {
-      if (cancelled || Date.now() > until) return;
+      if (cancelled || gen !== _tmSettleGen || Date.now() > until) return;
       var q = document.querySelector('.tm-post[data-msgid="' + msgId + '"]');
       var host = document.querySelector('.tm-content');
       if (!q || !host) return;
@@ -1295,11 +1299,33 @@
   // asynchronously after tmSelect, so retry until the target appears
   // instead of a single 300ms shot (which often missed on slow loads).
   function tmGotoPost(msgId) {
-    var tries = 0;
+    if (tmScrollToPost(msgId)) return; // already rendered — no toasts
+    // Immediate feedback + a timer-guaranteed verdict: the error must fire
+    // even if a retry step dies, else a lone "finding…" looks like a bug.
+    // The toast is sticky for the whole wait — a 2.2s fade left a silent
+    // gap before the verdict that read as "no error shown". 5s deadline:
+    // tmSelect already fetched the posts, nothing new arrives later.
+    var DEADLINE = 5000;
+    tmToast(tmI18n('finding_post', 'Finding the post…'), DEADLINE + 500);
+    // Bail (silently) if the user switches channels mid-search — both to
+    // skip a stale verdict and because msg numbers are per-channel, so a
+    // late retry could match a same-numbered post in the new channel.
+    var wantCh = tmActive;
+    var done = false;
+    var failT = setTimeout(function () {
+      done = true;
+      if (tmActive === wantCh) tmToast(tmI18n('telemirror_post_not_loaded', 'Post not loaded'));
+      else if (typeof hideToast === 'function') hideToast();
+    }, DEADLINE);
     (function attempt() {
-      if (tmScrollToPost(msgId)) return;
-      if (++tries < 15) { setTimeout(attempt, 400); return; }
-      tmToast(tmI18n('telemirror_post_not_loaded', 'Post not loaded'));
+      if (done) return;
+      if (tmActive !== wantCh || tmScrollToPost(msgId)) {
+        done = true;
+        clearTimeout(failT);
+        if (typeof hideToast === 'function') hideToast(); // clear the sticky "finding…"
+        return;
+      }
+      setTimeout(attempt, 400);
     })();
   }
   window.tmScrollToPost = tmScrollToPost;

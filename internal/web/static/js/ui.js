@@ -87,6 +87,13 @@ function showToast(msg, ms) {
   if (_toastTimer) clearTimeout(_toastTimer);
   _toastTimer = setTimeout(function () { el.classList.remove('show'); _toastTimer = null; }, ms || 2200);
 }
+// hideToast dismisses the current toast early — used when a long-lived
+// progress toast ("finding the post…") is resolved by success.
+function hideToast() {
+  var el = document.getElementById('toast');
+  if (el) el.classList.remove('show');
+  if (_toastTimer) { clearTimeout(_toastTimer); _toastTimer = null; }
+}
 
 // ===== UTILITIES =====
 function formatTitleWithFlag(s) {
@@ -160,15 +167,47 @@ function gotoChannelPost(chNum, msgId) {
   // closeSavedMessages only strips the class) — selectChannel restores it.
   var mEl = document.getElementById('messages');
   var paneOk = mEl && !mEl.classList.contains('saved-mode') && mEl.querySelector('.msg');
-  var p = (chNum === selectedChannel && paneOk) ? Promise.resolve() : selectChannel(chNum);
+  var reselected = !(chNum === selectedChannel && paneOk);
+  var p = reselected ? selectChannel(chNum) : Promise.resolve();
   if (!msgId) return;
+  var done = false;
+  function finish(found) {
+    if (done) return;
+    done = true;
+    if (found) { if (reselected) hideToast(); return; } // clear the sticky "finding…"
+    if (reselected) hideToast();
+    // Stay silent if the user already navigated elsewhere.
+    if (selectedChannel === chNum) showToast(t('msg_not_in_cache') || 'Message no longer in cache');
+  }
+  // The verdict is timer-guaranteed: even if selectChannel hangs on a slow
+  // refresh or a retry step dies, the user gets the error — a lone
+  // "finding…" with no outcome reads as "no error shown".
+  var deadline = reselected ? 8000 : 1500;
+  setTimeout(function () { finish(false); }, deadline);
+  // Sticky for the whole wait: the default 2.2s toast faded mid-search and
+  // the silent gap until the verdict read as "no error shown".
+  if (reselected) showToast(t('finding_post') || 'Finding the post…', deadline + 500);
   Promise.resolve(p).catch(function () { }).then(function () {
-    var tries = 0;
+    var checkedCache = false;
     (function attempt() {
-      if (selectedChannel !== chNum) return; // user navigated away
-      if (scrollToMsg(msgId)) return;
-      if (++tries < 12) { setTimeout(attempt, 500); return; }
-      showToast(t('msg_not_in_cache') || 'Message no longer in cache');
+      if (done) return;
+      if (selectedChannel !== chNum) { done = true; if (reselected) hideToast(); return; } // user navigated away
+      if (scrollToMsg(msgId)) { finish(true); return; }
+      if (checkedCache) { setTimeout(attempt, 500); return; }
+      checkedCache = true;
+      // Cache check, once — the response carries the whole message window,
+      // so per-retry fetches would churn megabytes on a phone. Valid once:
+      // the oldest cached ID only rises, and a post older than it can never
+      // arrive via refresh (bounded server window) — fail now instead of
+      // burning the whole retry window.
+      fetch('/api/messages/' + chNum).then(function (r) { return r.json(); }).then(function (d) {
+        if (done) return;
+        var ms = (d && d.messages) || [];
+        var oldest = Infinity;
+        for (var i = 0; i < ms.length; i++) { var mid = ms[i].ID || ms[i].id || 0; if (mid && mid < oldest) oldest = mid; }
+        if (ms.length && +msgId < oldest) { finish(false); return; }
+        setTimeout(attempt, 500);
+      }).catch(function () { if (!done) setTimeout(attempt, 500); });
     })();
   });
 }
