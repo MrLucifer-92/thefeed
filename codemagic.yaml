@@ -70,10 +70,10 @@ workflows:
         - include: false
           pattern: '*-*'
       cancel_previous_builds: true
-    # The name below must match the App Store Connect API key you add under
-    # Codemagic → Teams → Integrations → Developer Portal. See the doc.
+    # Must match the App Store Connect API key's reference name under
+    # Codemagic → Teams → Integrations → Developer Portal (exact string).
     integrations:
-      app_store_connect: thefeed_app_store_connect
+      app_store_connect: "CodeMagic API Key"
     environment:
       xcode: latest
       ios_signing:
