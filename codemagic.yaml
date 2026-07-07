@@ -74,7 +74,7 @@ workflows:
     # Codemagic → Teams → Integrations → Developer Portal (exact string).
     # This project uses its own dedicated key — do not reuse other projects'.
     integrations:
-      app_store_connect: thefeed_app_store_connect
+      app_store_connect: "CodeMagic API Key"
     environment:
       xcode: latest
       ios_signing:
