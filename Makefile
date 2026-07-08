@@ -1,7 +1,7 @@
 .PHONY: all build build-server build-client test clean lint fmt vet \
 	ios-bind ios-bind-catalyst ios-build ios-test ios-clean ios-list-sims ios-deps \
 	mac-dmg mac-app mac-clean \
-	push push-tags release app-release setup-remotes
+	push push-tags release setup-remotes
 
 BINARY_SERVER = thefeed-server
 BINARY_CLIENT = thefeed-client
@@ -364,21 +364,6 @@ release:
 		echo "Tag $(V) already exists locally — delete it first or pick a new version" >&2; exit 1; \
 	fi
 	git tag -a $(V) -m "$(if $(M),$(M),Release $(V))"
-	$(MAKE) push
-	$(MAKE) push-tags
-
-# Store release: tags app-vX.Y.Z → Codemagic builds + ships to TestFlight and
-# Google Play. GitHub/GitLab pipelines ignore app-* tags (they trigger on v*
-# only), and Codemagic ignores plain v* — the namespaces don't overlap.
-#   make app-release V=v0.31.0 [M="notes"]      (app- prefix added here)
-app-release:
-	@test -n "$(V)" || { echo "set V=vX.Y.Z (e.g. make app-release V=v0.31.0)" >&2; exit 1; }
-	@case "$(V)" in v[0-9]*) ;; *) echo "V must be vX.Y.Z (got $(V)) — the app- prefix is added automatically" >&2; exit 1 ;; esac
-	@case "$(V)" in *-*) echo "no pre-release tags for store builds (got $(V)) — Codemagic skips hyphenated tags" >&2; exit 1 ;; esac
-	@if git rev-parse "app-$(V)" >/dev/null 2>&1; then \
-		echo "Tag app-$(V) already exists locally — delete it first or pick a new version" >&2; exit 1; \
-	fi
-	git tag -a app-$(V) -m "$(if $(M),$(M),Store release app-$(V))"
 	$(MAKE) push
 	$(MAKE) push-tags
 

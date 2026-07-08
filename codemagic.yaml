@@ -20,16 +20,20 @@ definitions:
 
   scripts:
     - &derive_version
-      name: Derive marketing version from the app-v tag
+      name: Derive marketing version from the selected tag
       script: |
         set -e
-        VER="${CM_TAG#app-v}"
+        # Start a build in the Codemagic UI and pick a release tag (vX.Y.Z);
+        # CM_TAG carries it here. A leading v (or an old app-v) is stripped so
+        # v0.31.0 → marketing version 0.31.0.
+        VER="${CM_TAG#app-}"
+        VER="${VER#v}"
         if [ -z "$CM_TAG" ]; then
-          VER="0.0.1"   # manual run without a tag — debug builds only
-          echo "WARNING: no tag; using fallback version $VER"
+          VER="0.0.1"   # started on a branch, no tag — debug builds only
+          echo "WARNING: no tag selected; using fallback version $VER"
         else
           case "$VER" in
-            *[!0-9.]*|"") echo "Tag must be app-vX.Y.Z (got: $CM_TAG)"; exit 1;;
+            *[!0-9.]*|"") echo "Pick a vX.Y.Z tag (got: $CM_TAG)"; exit 1;;
           esac
         fi
         echo "APP_MARKETING_VERSION=$VER" >> "$CM_ENV"
@@ -57,19 +61,10 @@ workflows:
     name: iOS · TestFlight
     max_build_duration: 90
     instance_type: mac_mini_m2
-    # Store builds run on their own tag namespace: `app-vX.Y.Z`. The GitHub and
-    # GitLab pipelines trigger on `v*` only, so an app-v tag builds HERE and
-    # nowhere else (and a plain v release never burns Codemagic minutes).
-    # Pre-release tags (any hyphen, e.g. app-v1.2.0-rc1) are excluded.
-    triggering:
-      events:
-        - tag
-      tag_patterns:
-        - include: true
-          pattern: 'app-v*'
-        - include: false
-          pattern: '*-*'
-      cancel_previous_builds: true
+    # No `triggering:` — this workflow is manual-only. Start it from the
+    # Codemagic UI and pick the release tag when you want a store build; the
+    # tag drives the marketing version (see derive_version). GitHub/GitLab
+    # still build every v* tag for the desktop/self-host binaries.
     # Must match the App Store Connect API key's reference name under
     # Codemagic → Teams → Integrations → Developer Portal (exact string).
     # This project uses its own dedicated key — do not reuse other projects'.
@@ -140,15 +135,8 @@ workflows:
     name: Android · Google Play
     max_build_duration: 90
     instance_type: mac_mini_m2
-    triggering:
-      events:
-        - tag
-      tag_patterns:
-        - include: true
-          pattern: 'app-v*'
-        - include: false
-          pattern: '*-*'
-      cancel_previous_builds: true
+    # Manual-only (no `triggering:`) — start from the Codemagic UI and pick a
+    # release tag. See the iOS workflow's note above.
     environment:
       # These groups hold the secrets you add in Codemagic → App settings →
       # Environment variables (see the doc). Mark them all "Secure".
