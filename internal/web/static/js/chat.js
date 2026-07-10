@@ -1149,7 +1149,8 @@ function chatStartNew() {
   var inp = document.getElementById('chatAddAddr');
   var addr = chatCanonAddr(inp.value);
   if (!addr) { showToast(chatT('chat_bad_address')); return }
-  if (addr === (chatState.info && chatState.info.address)) { showToast(chatT('chat_bad_address')); return }
+  // A valid address that's your own — say so, don't call it "invalid".
+  if (addr === (chatState.info && chatState.info.address)) { showToast(chatT('chat_self_address')); return }
   // Enabled servers, falling back to the disk-backed list so starting a chat
   // works on first open before the availability probe lands.
   var servers = chatEnabledServers();

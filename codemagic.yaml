@@ -138,11 +138,10 @@ workflows:
     # Manual-only (no `triggering:`) — start from the Codemagic UI and pick a
     # release tag. See the iOS workflow's note above.
     environment:
+      android_signing:
+        - "TheFeed Keystore"
       # These groups hold the secrets you add in Codemagic → App settings →
       # Environment variables (see the doc). Mark them all "Secure".
-      groups:
-        - keystore_credentials      # KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
-        - google_play_credentials   # GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
       vars:
         PACKAGE_NAME: "com.thefeed.android"
         # JDK 17 is the version AGP needs (jlink breaks on JDK 24+).
