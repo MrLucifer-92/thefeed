@@ -140,8 +140,6 @@ workflows:
     environment:
       android_signing:
         - "TheFeed Keystore"
-      # These groups hold the secrets you add in Codemagic → App settings →
-      # Environment variables (see the doc). Mark them all "Secure".
       vars:
         PACKAGE_NAME: "com.thefeed.android"
         # JDK 17 is the version AGP needs (jlink breaks on JDK 24+).
@@ -197,7 +195,7 @@ workflows:
       - android/app/build/outputs/**/mapping.txt
     publishing:
       google_play:
-        credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+        credentials: $GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS
         track: internal
         # Keep builds out of auto-rollout until you promote them in the console.
         submit_as_draft: true
