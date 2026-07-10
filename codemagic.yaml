@@ -172,11 +172,14 @@ workflows:
           mkdir -p android/app/libs
           gomobile bind -target=android/arm,android/arm64,android/386,android/amd64 -androidapi 24 \
             -ldflags="${LDFLAGS}" -o android/app/libs/mobile.aar ./mobile
-      - name: Decode signing keystore
+      - name: Wire signing keystore
         script: |
           set -e
-          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
-          echo "Keystore written ($(wc -c < android/app/keystore.jks) bytes)"
+          cp "$CM_KEYSTORE_PATH" android/app/keystore.jks
+          echo "KEYSTORE_PASSWORD=$CM_KEYSTORE_PASSWORD" >> "$CM_ENV"
+          echo "KEY_ALIAS=$CM_KEY_ALIAS" >> "$CM_ENV"
+          echo "KEY_PASSWORD=$CM_KEY_PASSWORD" >> "$CM_ENV"
+          echo "Keystore wired ($(wc -c < android/app/keystore.jks) bytes)"
       - name: Build signed AAB
         script: |
           set -e
