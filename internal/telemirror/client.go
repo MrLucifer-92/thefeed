@@ -23,14 +23,13 @@ const (
 )
 
 // proxyHosts are the Google-Translate proxy hostnames for Telegram's
-// public web preview, tried in order. Google dropped t.me
-// (t-me.translate.goog) from the Translate proxy — it now returns 404
-// worldwide — so we use Telegram's alias domains, which serve the
-// identical /s/<channel> widget HTML and are still proxied. If Google
-// blocks one, the fetch falls through to the next.
+// public web preview, tried in order. All serve the identical
+// /s/<channel> widget HTML. On a per-host 404 the fetch falls through to
+// the next entry; t-me stays last as a fallback.
 var proxyHosts = []string{
 	"telegram-me.translate.goog",  // telegram.me
 	"telegram-dog.translate.goog", // telegram.dog
+	"t-me.translate.goog",         // t.me
 }
 
 // sniUseHost is a proxyAttempt.sni sentinel meaning "use the request's
