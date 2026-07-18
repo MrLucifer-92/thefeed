@@ -13,11 +13,12 @@
 <table align="center">
 <tr>
 <td align="center"><img src="docs/screenshots/mainfeed.jpg" width="170" alt="فید اصلی"><br><sub>فید اصلی</sub></td>
-<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="پیام‌رسان"><br><sub>پیام‌رسان</sub></td>
 <td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="خواندن پست"><br><sub>خواندن پست</sub></td>
 <td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="تله‌میرور"><br><sub>تله‌میرور</sub></td>
+<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="پیام‌رسان"><br><sub>پیام‌رسان</sub></td>
 </tr>
 <tr>
+<td align="center"><img src="docs/screenshots/chat-list.jpg" width="170" alt="گفتگوها"><br><sub>گفتگوها</sub></td>
 <td align="center"><img src="docs/screenshots/scanner.jpg" width="170" alt="اسکنر ریزالور"><br><sub>اسکنر ریزالور</sub></td>
 <td align="center"><img src="docs/screenshots/resolver-bank.jpg" width="170" alt="بانک ریزالور"><br><sub>بانک ریزالور</sub></td>
 <td align="center"><img src="docs/screenshots/settings.jpg" width="170" alt="تنظیمات"><br><sub>تنظیمات</sub></td>

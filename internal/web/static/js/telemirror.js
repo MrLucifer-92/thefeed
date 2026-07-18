@@ -495,6 +495,18 @@
       + '</pre></div>';
   }
 
+  // tmShowNotFound is the friendly (no raw error dump) state for a channel
+  // the proxy has no public web preview for — wrong @username, renamed, or
+  // private. Distinct from tmShowError, which is for transport failures.
+  function tmShowNotFound() {
+    var content = document.getElementById('tmContent');
+    content.innerHTML =
+      '<div class="tm-empty"><p>' + tmEsc(tmI18n('telemirror_channel_not_found', 'Channel not found.')) + '</p>'
+      + '<p style="margin-top:6px;color:var(--text-dim);font-size:13px">'
+      + tmEsc(tmI18n('telemirror_channel_not_found_hint', 'Check the username — it may not exist, was renamed, or is private.'))
+      + '</p></div>';
+  }
+
   async function tmSelect(username, opts) {
     opts = opts || {};
     tmActive = username;
@@ -507,6 +519,7 @@
       if (opts.refresh) url += '?refresh=1';
       var r = await fetch(url);
       if (!r.ok) {
+        if (r.status === 404) { tmShowNotFound(); return; }
         var errBody = '';
         try { errBody = await r.text(); } catch (e2) { }
         tmShowError(errBody || ('HTTP ' + r.status));
@@ -1360,6 +1373,7 @@
     overlay.id = 'tmLinkSheet';
     overlay.className = 'tm-link-overlay';
     var html = '<div class="tm-link-sheet">'
+      + '<button class="tm-link-close" type="button" aria-label="' + tmEsc(tmI18n('close', 'Close')) + '">' + window.icon('x') + '</button>'
       + '<div class="tm-link-title">' + tmEsc(tmI18n('telemirror_open_this_link', 'Open this link?')) + '</div>'
       + '<div class="tm-link-url" dir="ltr">' + tmEsc(url) + '</div>'
       + '<div class="tm-link-actions">'
@@ -1378,6 +1392,9 @@
     overlay.addEventListener('click', function (e) {
       if (e.target === overlay) overlay.remove();
     });
+    // Direct handler — a real click targets the svg inside the button, so
+    // target-class matching on the overlay never fires (see core.js note).
+    overlay.querySelector('.tm-link-close').onclick = function () { overlay.remove(); };
     overlay.querySelector('.tm-link-copy').onclick = function () {
       try {
         if (navigator.clipboard) { navigator.clipboard.writeText(url).catch(function () {}); }
